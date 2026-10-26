@@ -7,6 +7,7 @@ import {
   StyleSheet,
   TextInput,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { launchCamera } from 'react-native-image-picker';
 import {
@@ -48,6 +49,7 @@ const LANGUAGES = [
 ];
 const ID_TYPES = ['Aadhaar', 'PAN', 'Passport', 'Driving licence'];
 const MAX_PHOTOS = 4;
+const PHOTO_GAP = 12;
 
 const ageFrom = (d, m, y) => {
   const dob = new Date(Number(y), Number(m) - 1, Number(d));
@@ -103,6 +105,10 @@ export default function HostApplyScreen({ navigation, route }) {
   const prev = route.params?.resubmit ? hostApp.data || {} : {};
   const maxRate = HOST_LEVEL_MAX[hostLevel];
   const [step, setStep] = useState(0);
+  // Fixed pixel sizes: % widths + aspectRatio lay out unevenly in wrapped rows.
+  const { width: screenW } = useWindowDimensions();
+  const slotW = Math.floor((screenW - spacing.md * 2 - PHOTO_GAP) / 2);
+  const slot = { width: slotW, height: Math.round(slotW * 1.25) };
 
   const [name, setName] = useState(prev.name || user.name || '');
   const [gender, setGender] = useState(prev.gender || user.gender || null);
@@ -305,7 +311,7 @@ export default function HostApplyScreen({ navigation, route }) {
             <View style={styles.photos}>
               {Array.from({ length: MAX_PHOTOS }).map((_, i) =>
                 photos[i] ? (
-                  <View key={i} style={styles.photo}>
+                  <View key={i} style={[styles.photo, slot]}>
                     <Image
                       source={{ uri: photos[i] }}
                       style={StyleSheet.absoluteFill}
@@ -328,7 +334,7 @@ export default function HostApplyScreen({ navigation, route }) {
                 ) : (
                   <Pressable
                     key={i}
-                    style={[styles.photo, styles.photoEmpty]}
+                    style={[styles.photo, slot, styles.photoEmpty]}
                     onPress={() => setPicker(true)}
                   >
                     <Plus size={26} color={colors.textMuted} />
@@ -558,10 +564,13 @@ const styles = StyleSheet.create({
   },
   dobYear: { width: 92 },
   err: { marginTop: 6 },
-  photos: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 12 },
+  photos: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: PHOTO_GAP,
+    marginTop: 12,
+  },
   photo: {
-    width: '47.5%',
-    aspectRatio: 0.8,
     borderRadius: radius.md,
     overflow: 'hidden',
     backgroundColor: colors.surfaceMuted,

@@ -38,7 +38,8 @@ export default function Screen({
       ) : (
         <View style={[styles.root, contentStyle]}>{children}</View>
       )}
-      {footer}
+      {/* Breathing room under bottom buttons so they never sit on the nav bar. */}
+      {footer ? <View style={styles.footer}>{footer}</View> : null}
     </View>
   );
 }
@@ -46,4 +47,10 @@ export default function Screen({
 const styles = StyleSheet.create({
   root: { flex: 1 },
   content: { paddingBottom: 32 },
+  footer: {
+    paddingBottom: 24,
+    backgroundColor: colors.background,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
 });
