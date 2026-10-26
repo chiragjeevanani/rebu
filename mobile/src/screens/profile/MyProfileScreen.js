@@ -305,7 +305,7 @@ export default function MyProfileScreen({ navigation }) {
         <ListRow icon={LogOut} title="Log out" danger onPress={signOut} last />
       </Card>
       <Txt variant="tiny" center style={styles.version}>
-        REBU v1.0.0
+        REBU v1.3.0
       </Txt>
     </Screen>
   );
