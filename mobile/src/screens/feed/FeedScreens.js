@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useCallback, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   Dimensions,
   FlatList,
@@ -8,8 +9,8 @@ import {
 } from 'react-native';
 import { Search, UsersRound } from 'lucide-react-native';
 import { colors, fonts, spacing } from '../../theme';
-import { HOSTS } from '../../data/mock';
-import { ROOMS } from '../../data/social';
+import { useHosts } from '../../api/hosts';
+import { listRooms } from '../../api/rooms';
 import { useApp } from '../../context/AppContext';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
@@ -28,9 +29,9 @@ const GAP = 3;
 const COL = (W - GAP * 3) / 2;
 const ROW_CARD = W * 0.45;
 
-// Online hosts open their live room; offline hosts open their profile.
+// Hosts who are live open their live room; everyone else opens their profile.
 const openHost = (navigation, h) =>
-  navigation.navigate(h.online ? 'LiveRoom' : 'HostProfile', { host: h });
+  navigation.navigate(h.liveId ? 'LiveRoom' : 'HostProfile', { host: h });
 
 const byOnline = list =>
   [...list].sort((a, b) => b.online - a.online || b.followers - a.followers);
@@ -39,21 +40,21 @@ const byOnline = list =>
 export const LISTS = {
   nearby: {
     title: 'Nearby',
-    hosts: () => [...HOSTS].sort((a, b) => a.distanceKm - b.distanceKm),
+    hosts: all => [...all].sort((a, b) => a.distanceKm - b.distanceKm),
   },
   new: {
     title: 'New hosts',
-    hosts: () => HOSTS.filter(h => h.followers < 10000),
+    hosts: all => all.filter(h => h.followers < 10000),
   },
   popular: {
     title: 'Popular',
-    hosts: () => [...HOSTS].sort((a, b) => b.followers - a.followers),
+    hosts: all => [...all].sort((a, b) => b.followers - a.followers),
   },
   rated: {
     title: 'Top rated',
-    hosts: () => [...HOSTS].sort((a, b) => b.rating - a.rating),
+    hosts: all => [...all].sort((a, b) => b.rating - a.rating),
   },
-  online: { title: 'Online now', hosts: () => HOSTS.filter(h => h.online) },
+  online: { title: 'Online now', hosts: all => all.filter(h => h.online) },
 };
 
 function Grid({ hosts, header, empty, navigation }) {
@@ -80,11 +81,12 @@ function Grid({ hosts, header, empty, navigation }) {
 
 /* ---------- For You ---------- */
 export function ForYouScreen({ navigation }) {
+  const hosts = useHosts();
   return (
     <Screen>
       <TopBar />
       <Grid
-        hosts={byOnline(HOSTS)}
+        hosts={byOnline(hosts)}
         header={<QuickActions />}
         navigation={navigation}
       />
@@ -96,8 +98,9 @@ export function ForYouScreen({ navigation }) {
 /* ---------- Following ---------- */
 export function FollowingScreen({ navigation }) {
   const { following } = useApp();
-  const followed = HOSTS.filter(h => following.includes(h.id));
-  const suggestions = byOnline(HOSTS.filter(h => !following.includes(h.id)));
+  const hosts = useHosts();
+  const followed = hosts.filter(h => following.includes(h.id));
+  const suggestions = byOnline(hosts.filter(h => !following.includes(h.id)));
   const anyOnline = followed.some(h => h.online);
 
   return (
@@ -149,9 +152,18 @@ export function FollowingScreen({ navigation }) {
 
 /* ---------- Explore ---------- */
 export function ExploreScreen({ navigation }) {
+  const hosts = useHosts();
+  const [rooms, setRooms] = useState([]);
+  useFocusEffect(
+    useCallback(() => {
+      listRooms()
+        .then(setRooms)
+        .catch(() => {});
+    }, []),
+  );
   const row = key =>
     LISTS[key]
-      .hosts()
+      .hosts(hosts)
       .map(h => (
         <LiveCard
           key={h.id}
@@ -189,7 +201,17 @@ export function ExploreScreen({ navigation }) {
               title="Audio rooms"
               onMore={() => navigation.navigate('Rooms')}
             >
-              {ROOMS.slice(0, 5).map(r => (
+              {rooms.length ? null : (
+                <Pressable
+                  style={styles.roomCell}
+                  onPress={() => navigation.navigate('CreateRoom')}
+                >
+                  <Txt variant="small" color={colors.textMuted}>
+                    No rooms open yet — tap to start one.
+                  </Txt>
+                </Pressable>
+              )}
+              {rooms.slice(0, 5).map(r => (
                 <View key={r.id} style={styles.roomCell}>
                   <RoomCard
                     room={r}
@@ -241,11 +263,12 @@ export function ExploreScreen({ navigation }) {
 
 /* ---------- "More" list ---------- */
 export function HostListScreen({ navigation, route }) {
+  const hosts = useHosts();
   const list = LISTS[route.params?.list] || LISTS.online;
   return (
     <Screen>
       <Header title={list.title} />
-      <Grid hosts={list.hosts()} navigation={navigation} />
+      <Grid hosts={list.hosts(hosts)} navigation={navigation} />
     </Screen>
   );
 }

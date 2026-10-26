@@ -14,13 +14,13 @@ import {
   Wallet,
 } from 'lucide-react'
 import { useStore } from '../hooks/useStore'
+import { useAdminEvent, useApi } from '../hooks/useApi'
 import { canAccess } from '../routes/nav'
-import { Badge, Card, PageHeader, Seg, Stat, Status, Who } from '../components/ui'
+import { Badge, Card, Empty, PageHeader, Pending, Seg, Stat, Who } from '../components/ui'
 import { BarList, TrendChart } from '../components/charts'
-import { ago, compact, inr, num } from '../utils/format'
+import { ago, compact, inr, label, num, withDayLabels } from '../utils/format'
 
-const sum = (list, key) => list.reduce((n, x) => n + x[key], 0)
-const trend = (cur, prev) => (prev ? ((cur - prev) / prev) * 100 : 0)
+const LIVE_EVENTS = ['live:started', 'live:ended', 'report:new', 'support:new']
 
 function greeting() {
   const h = new Date().getHours()
@@ -28,56 +28,12 @@ function greeting() {
 }
 
 export default function DashboardPage() {
-  const { db, me } = useStore()
+  const { me } = useStore()
   const [range, setRange] = useState(7)
-
-  const m = db.metrics
-  const cur = m.slice(-range)
-  const prev = m.slice(-range * 2, -range)
-  const prevOrHalf = prev.length === range ? prev : m.slice(0, m.length - range)
-
-  const k = useMemo(
-    () => ({
-      revenue: sum(cur, 'revenue'),
-      revenueT: trend(sum(cur, 'revenue'), sum(prevOrHalf, 'revenue')),
-      dau: Math.round(sum(cur, 'dau') / cur.length),
-      dauT: trend(sum(cur, 'dau') / cur.length, sum(prevOrHalf, 'dau') / Math.max(1, prevOrHalf.length)),
-      calls: sum(cur, 'calls'),
-      callsT: trend(sum(cur, 'calls'), sum(prevOrHalf, 'calls')),
-      payouts: sum(cur, 'hostPayouts'),
-      payoutsT: trend(sum(cur, 'hostPayouts'), sum(prevOrHalf, 'hostPayouts')),
-    }),
-    [cur, prevOrHalf],
-  )
-
-  const live = {
-    hostsOnline: db.hosts.filter(h => h.online && h.status === 'active').length,
-    lives: db.lives.filter(l => l.status === 'live').length,
-    calls: db.calls.filter(c => c.status === 'ongoing').length,
-    newUsers: m[m.length - 1].newUsers,
-  }
-
-  const pendingApps = db.applications.filter(a => a.status === 'pending')
-  const requested = db.withdrawals.filter(w => w.status === 'requested')
-  const openReports = db.reports.filter(r => r.status === 'open')
-  const openDisputes = db.disputes.filter(d => d.status === 'open')
-  const openTickets = db.tickets.filter(t => t.status === 'open')
-
-  const attention = [
-    { section: 'applications', to: '/admin/host-applications', icon: BadgeCheck, label: 'Host applications to review', value: pendingApps.length },
-    { section: 'finance', to: '/admin/finance/withdrawals', icon: Wallet, label: 'Withdrawals waiting', value: requested.length, extra: inr(sum(requested, 'amount')) },
-    { section: 'reports', to: '/admin/reports', icon: Flag, label: 'Open reports', value: openReports.length, extra: `${openReports.filter(r => r.priority === 'high').length} high priority` },
-    { section: 'finance', to: '/admin/finance/disputes', icon: Scale, label: 'Earning disputes', value: openDisputes.length },
-    { section: 'support', to: '/admin/support', icon: LifeBuoy, label: 'Open support tickets', value: openTickets.length },
-  ].filter(a => canAccess(me.role, a.section))
-
-  const topHosts = [...db.hosts].sort((a, b) => b.lifetime - a.lifetime).slice(0, 6)
-  const paid = db.transactions.filter(t => t.status === 'success')
-  const byMethod = Object.entries(
-    paid.reduce((o, t) => ({ ...o, [t.method]: (o[t.method] || 0) + t.amount }), {}),
-  )
-    .map(([label, value]) => ({ label, value }))
-    .sort((a, b) => b.value - a.value)
+  const res = useApi('/admin/dashboard', { days: range })
+  const hostsTotal = useApi(canAccess(me.role, 'hosts') ? '/admin/hosts' : null, { limit: 1 })
+  const revenue = useApi(canAccess(me.role, 'finance') ? '/admin/finance/revenue' : null, { days: 30 })
+  useAdminEvent(LIVE_EVENTS, res.reload)
 
   return (
     <div className="a-stack" style={{ gap: 20 }}>
@@ -95,19 +51,43 @@ export default function DashboardPage() {
           />
         }
       />
+      <Pending res={res}>
+        {d => <Body d={d} range={range} hostsTotal={hostsTotal.data?.total} revenue={revenue.data} />}
+      </Pending>
+    </div>
+  )
+}
 
+function Body({ d, range, hostsTotal, revenue }) {
+  const { me } = useStore()
+  const k = d.kpis
+  const cur = useMemo(() => withDayLabels(d.series), [d.series])
+  const at = d.attention
+
+  const attention = [
+    { section: 'applications', to: '/admin/host-applications', icon: BadgeCheck, label: 'Host applications to review', value: at.pendingApplications },
+    { section: 'finance', to: '/admin/finance/withdrawals', icon: Wallet, label: 'Withdrawals waiting', value: at.withdrawalsRequested.count, extra: inr(at.withdrawalsRequested.amount) },
+    { section: 'reports', to: '/admin/reports', icon: Flag, label: 'Open reports', value: at.openReports.count, extra: `${at.openReports.high} high priority` },
+    { section: 'finance', to: '/admin/finance/disputes', icon: Scale, label: 'Earning disputes', value: at.openDisputes },
+    { section: 'support', to: '/admin/support', icon: LifeBuoy, label: 'Open support tickets', value: at.openTickets },
+  ].filter(a => canAccess(me.role, a.section))
+
+  const byMethod = (revenue?.byMethod || []).map(m => ({ label: label(m.method), value: m.revenue }))
+
+  return (
+    <>
       <div className="a-grid c4">
-        <Stat label="Revenue" value={inr(k.revenue)} trend={k.revenueT} sub="vs previous period" icon={IndianRupee} />
-        <Stat label="Daily active users" value={num(k.dau)} trend={k.dauT} sub="average" icon={UsersRound} />
-        <Stat label="Calls" value={num(k.calls)} trend={k.callsT} sub="connected" icon={PhoneCall} />
-        <Stat label="Host earnings" value={inr(k.payouts)} trend={k.payoutsT} sub="credited to hosts" icon={Wallet} />
+        <Stat label="Revenue" value={inr(k.revenue.value)} trend={k.revenue.change} sub="vs previous period" icon={IndianRupee} />
+        <Stat label="Daily active users" value={num(k.dau.value)} trend={k.dau.change} sub="average" icon={UsersRound} />
+        <Stat label="Calls" value={num(k.calls.value)} trend={k.calls.change} sub="placed" icon={PhoneCall} />
+        <Stat label="Host earnings" value={inr(k.hostEarnings.value)} trend={k.hostEarnings.change} sub="credited to hosts" icon={Wallet} />
       </div>
 
       <div className="a-grid c4">
-        <Stat label="Hosts online now" value={live.hostsOnline} sub={`of ${db.hosts.length} hosts`} icon={UsersRound} />
-        <Stat label="Live streams now" value={live.lives} sub="lives, parties & audio rooms" icon={Radio} />
-        <Stat label="Calls in progress" value={live.calls} sub="video & voice" icon={PhoneCall} />
-        <Stat label="New users today" value={num(live.newUsers)} icon={UserPlus} />
+        <Stat label="Hosts online now" value={d.live.hostsOnline} sub={hostsTotal != null ? `of ${hostsTotal} hosts` : 'available for calls'} icon={UsersRound} />
+        <Stat label="Live streams now" value={d.live.activeLives} sub="lives, parties & audio rooms" icon={Radio} />
+        <Stat label="Calls in progress" value={d.live.callsInProgress} sub="video & voice" icon={PhoneCall} />
+        <Stat label="New users today" value={num(d.live.newUsersToday)} icon={UserPlus} />
       </div>
 
       <div className="a-grid side">
@@ -134,7 +114,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="a-grid c2">
-        <Card title="Daily active users" subtitle={`Last ${range} days`}>
+        <Card title="Daily active users" subtitle={`Last ${range} days · approximate`}>
           <TrendChart type="line" data={cur} series={[{ key: 'dau', label: 'Active users' }]} format={v => num(v)} yFormat={compact} height={220} />
         </Card>
         <Card title="Calls & new users" subtitle={`Last ${range} days`}>
@@ -155,7 +135,7 @@ export default function DashboardPage() {
       <div className="a-grid side">
         <Card
           title="Top hosts"
-          subtitle="By lifetime earnings"
+          subtitle={`By earnings · last ${range} days`}
           padded={false}
           actions={
             canAccess(me.role, 'hosts') ? (
@@ -165,50 +145,56 @@ export default function DashboardPage() {
             ) : null
           }
         >
-          <div className="a-table-wrap">
-            <table className="a-table">
-              <thead>
-                <tr>
-                  <th>Host</th>
-                  <th>Level</th>
-                  <th className="right">Call min</th>
-                  <th className="right">Earned</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {topHosts.map(h => (
-                  <tr key={h.id}>
-                    <td>
-                      <Who src={h.avatar} name={h.name} sub={h.city} to={`/admin/hosts/${h.id}`} />
-                    </td>
-                    <td>
-                      <Badge tone="ink">Lv {h.level}</Badge>
-                    </td>
-                    <td className="right">{num(h.callMinutes)}</td>
-                    <td className="right a-strong">{inr(h.lifetime)}</td>
-                    <td>{h.online ? <Status value="online" /> : <Status value="offline" />}</td>
+          {d.topHosts.length ? (
+            <div className="a-table-wrap">
+              <table className="a-table">
+                <thead>
+                  <tr>
+                    <th>Host</th>
+                    <th className="right">Call min</th>
+                    <th className="right">Coins</th>
+                    <th className="right">Earned</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {d.topHosts.map(h => (
+                    <tr key={h.id}>
+                      <td>
+                        <Who src={h.avatar} name={h.name} to={canAccess(me.role, 'hosts') ? `/admin/hosts/${h.id}` : undefined} />
+                      </td>
+                      <td className="right">{num(h.minutes)}</td>
+                      <td className="right">{num(h.coins)}</td>
+                      <td className="right a-strong">{inr(h.net)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Empty title="No host earnings yet" text="Hosts appear here once they earn in this period." />
+          )}
         </Card>
         <div className="a-stack">
-          <Card title="Revenue by payment method" subtitle="Successful payments, last 30 days">
-            <BarList items={byMethod} format={inr} />
-          </Card>
+          {revenue ? (
+            <Card title="Revenue by payment method" subtitle="Successful payments, last 30 days">
+              {byMethod.length ? <BarList items={byMethod} format={inr} /> : <Empty title="No payments yet" />}
+            </Card>
+          ) : null}
           <Card title="Latest payments" padded={false}>
-            {paid.slice(0, 5).map(t => (
-              <div key={t.id} className="a-list-row">
-                <Who src={t.userAvatar} name={t.userName} sub={`${num(t.coins + t.bonus)} coins · ${ago(t.ts)}`} size={32} />
-                <span className="a-spacer" />
-                <b className="a-strong">{inr(t.amount)}</b>
-              </div>
-            ))}
+            {d.latestPayments.length ? (
+              d.latestPayments.slice(0, 5).map(t => (
+                <div key={t.id} className="a-list-row">
+                  <Who src={t.userAvatar} name={t.userName || 'User'} sub={`${num(t.coins + (t.bonus || 0))} coins · ${ago(t.ts)}`} size={32} />
+                  <span className="a-spacer" />
+                  <b className="a-strong">{inr(t.amount)}</b>
+                </div>
+              ))
+            ) : (
+              <Empty title="No payments yet" />
+            )}
           </Card>
         </div>
       </div>
-    </div>
+    </>
   )
 }

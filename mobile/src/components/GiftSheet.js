@@ -8,6 +8,7 @@ import Txt from './Txt';
 import Button from './Button';
 import CoinPill, { CoinIcon } from './CoinPill';
 import { BIG_GIFT_COINS, useGiftFx } from './GiftFx';
+import { post } from '../api/client';
 
 export default function GiftSheet({
   visible,
@@ -16,25 +17,47 @@ export default function GiftSheet({
   onRecharge,
   dark = true,
   to, // recipient name shown in the premium-gift animation
+  toId, // recipient host id → the server charges and credits the host
+  context, // { type: 'call'|'live'|'chat', id }
 }) {
-  const { coins, spendCoins, addTransaction } = useApp();
+  const { coins, setCoinsFromServer, config } = useApp();
+  // Admin-edited catalog from the server; the bundled list is only a fallback.
+  const gifts = config?.gifts?.length ? config.gifts : GIFTS;
   const fx = useGiftFx();
   const [selected, setSelected] = useState('rose');
-  const gift = GIFTS.find(g => g.key === selected);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+  const gift = gifts.find(g => g.key === selected) || gifts[0];
   const enough = coins >= gift.coins;
 
-  const send = () => {
-    if (!enough) return onRecharge?.();
-    spendCoins(gift.coins);
-    addTransaction({
-      type: 'gift',
-      title: `Gift · ${gift.name}`,
-      sub: 'Gift sent',
-      amount: -gift.coins,
-    });
+  const done = () => {
     onSend?.(gift);
     onClose();
     if (gift.coins >= BIG_GIFT_COINS) fx.play(gift, { to });
+  };
+
+  const send = async () => {
+    if (!enough) return onRecharge?.();
+    setError('');
+    if (toId) {
+      setSending(true);
+      try {
+        const r = await post('/gifts', {
+          toId,
+          giftKey: gift.key,
+          context: context || { type: 'chat' },
+        });
+        setCoinsFromServer(r.balance);
+        done();
+      } catch (e) {
+        if (e.code === 'insufficient_coins') onRecharge?.();
+        else setError(e.message);
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+    setError('Pick who to send it to.');
   };
 
   return (
@@ -46,7 +69,7 @@ export default function GiftSheet({
       right={<CoinPill amount={coins} onPress={onRecharge} light={!dark} />}
     >
       <View style={styles.grid}>
-        {GIFTS.map(g => {
+        {gifts.map(g => {
           const active = g.key === selected;
           return (
             <Pressable
@@ -88,13 +111,20 @@ export default function GiftSheet({
             : 'Not enough coins · Recharge'
         }
         onPress={send}
+        loading={sending}
         style={{ marginTop: 16 }}
       />
+      {error ? (
+        <Txt variant="small" center color={colors.danger} style={styles.error}>
+          {error}
+        </Txt>
+      ) : null}
     </Sheet>
   );
 }
 
 const styles = StyleSheet.create({
+  error: { marginTop: 8 },
   fxTag: {
     position: 'absolute',
     top: 4,

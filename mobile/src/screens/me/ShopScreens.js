@@ -1,8 +1,16 @@
-import React, { useState } from 'react';
-import { FlatList, Pressable, StyleSheet, View } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import {
+  ActivityIndicator,
+  FlatList,
+  Pressable,
+  StyleSheet,
+  View,
+} from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import LinearGradient from 'react-native-linear-gradient';
 import { colors, fonts, radius, spacing } from '../../theme';
-import { EVENTS, STORE_ITEMS } from '../../data/social';
+import { STORE_ITEMS } from '../../data/social';
+import { get } from '../../api/client';
 import { useApp } from '../../context/AppContext';
 import { num } from '../../utils/format';
 import Screen from '../../components/Screen';
@@ -18,6 +26,16 @@ const CATEGORIES = [
   { key: 'entry', label: 'Entry effects' },
   { key: 'bubble', label: 'Chat bubbles' },
 ];
+
+const MONTHS = 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split(' ');
+const daysLeft = until =>
+  Math.max(0, Math.round((new Date(until).getTime() - Date.now()) / 864e5));
+
+/** Store catalog: admin-edited on the server, bundled list as a fallback. */
+const useCatalog = () => {
+  const { config } = useApp();
+  return config?.storeItems?.length ? config.storeItems : STORE_ITEMS;
+};
 
 function ItemCard({ item, footer, active, onPress }) {
   return (
@@ -36,13 +54,49 @@ function ItemCard({ item, footer, active, onPress }) {
 
 /* ---------- Events ---------- */
 export function EventCenterScreen({ navigation }) {
+  const [events, setEvents] = useState(null);
+  useFocusEffect(
+    useCallback(() => {
+      get('/content/banners?placement=Events')
+        .then(r =>
+          setEvents(
+            r.items.map(b => {
+              const end = new Date(b.endsAt);
+              return {
+                id: b.id,
+                title: b.title,
+                sub: b.subtitle || '',
+                tag: b.cta || null,
+                link: b.link,
+                colors: [b.color || colors.primary, b.color || colors.primary],
+                ends: `Ends ${end.getDate()} ${MONTHS[end.getMonth()]}`,
+              };
+            }),
+          ),
+        )
+        .catch(() => setEvents([]));
+    }, []),
+  );
   return (
     <Screen>
       <Header title="Events" />
+      {!events ? (
+        <ActivityIndicator color={colors.primary} style={styles.loading} />
+      ) : null}
       <FlatList
-        data={EVENTS}
+        data={events || []}
         keyExtractor={e => e.id}
         contentContainerStyle={styles.list}
+        ListEmptyComponent={
+          events ? (
+            <View style={styles.empty}>
+              <Txt style={styles.emptyEmoji}>🎉</Txt>
+              <Txt variant="body" color={colors.textMuted} center>
+                No events right now. Check back soon!
+              </Txt>
+            </View>
+          ) : null
+        }
         renderItem={({ item }) => (
           <Pressable onPress={() => navigation.navigate('Wallet')}>
             <LinearGradient
@@ -69,10 +123,12 @@ export function EventCenterScreen({ navigation }) {
 
 /* ---------- Store ---------- */
 export function StoreScreen({ navigation }) {
-  const { owned, buyItem, equipItem } = useApp();
+  const { store, buyItem } = useApp();
+  const catalog = useCatalog();
   const [category, setCategory] = useState('frame');
   const [buying, setBuying] = useState(null);
-  const items = STORE_ITEMS.filter(i => i.category === category);
+  const items = catalog.filter(i => i.category === category);
+  const ownedUntil = id => store.owned.find(o => o.itemId === id)?.expiresAt;
 
   return (
     <Screen>
@@ -101,19 +157,19 @@ export function StoreScreen({ navigation }) {
         columnWrapperStyle={styles.gridRow}
         contentContainerStyle={styles.grid}
         renderItem={({ item }) => {
-          const has = owned.includes(item.id);
+          const until = ownedUntil(item.id);
           return (
             <ItemCard
               item={item}
-              onPress={() => (has ? null : setBuying(item))}
+              onPress={() => setBuying(item)}
               footer={
-                has ? (
+                until ? (
                   <Txt
                     variant="small"
                     color={colors.success}
                     style={styles.itemFoot}
                   >
-                    Owned
+                    Owned · {daysLeft(until)}d left
                   </Txt>
                 ) : (
                   <View style={[styles.price, styles.itemFoot]}>
@@ -133,14 +189,13 @@ export function StoreScreen({ navigation }) {
             title: `${buying.name} · ${buying.days} days`,
             emoji: buying.emoji,
             price: buying.price,
-            note: 'It’s added to My Items and equipped.',
+            note: ownedUntil(buying.id)
+              ? `You own it — this adds ${buying.days} more days.`
+              : 'It’s added to My Items and equipped.',
           }
         }
         onClose={() => setBuying(null)}
-        onBought={() => {
-          buyItem(buying.id);
-          equipItem(buying.category, buying.id);
-        }}
+        onBuy={() => buyItem(buying.id)}
         onRecharge={() => {
           setBuying(null);
           navigation.navigate('Wallet');
@@ -152,8 +207,14 @@ export function StoreScreen({ navigation }) {
 
 /* ---------- My Items ---------- */
 export function BackpackScreen({ navigation }) {
-  const { owned, equipped, equipItem } = useApp();
-  const items = STORE_ITEMS.filter(i => owned.includes(i.id));
+  const { store, equipped, equipItem } = useApp();
+  const catalog = useCatalog();
+  const items = store.owned
+    .map(o => {
+      const it = catalog.find(i => i.id === o.itemId);
+      return it && { ...it, expiresAt: o.expiresAt };
+    })
+    .filter(Boolean);
 
   return (
     <Screen>
@@ -184,14 +245,17 @@ export function BackpackScreen({ navigation }) {
             <ItemCard
               item={item}
               active={on}
-              onPress={() => equipItem(item.category, item.id)}
+              onPress={() =>
+                equipItem(item.category, on ? null : item.id).catch(() => {})
+              }
               footer={
                 <Txt
                   variant="small"
                   color={on ? colors.primary : colors.textMuted}
                   style={styles.itemFoot}
                 >
-                  {on ? 'Equipped' : 'Tap to equip'}
+                  {on ? 'Equipped' : 'Tap to equip'} ·{' '}
+                  {daysLeft(item.expiresAt)}d left
                 </Txt>
               }
             />
@@ -204,6 +268,7 @@ export function BackpackScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   list: { paddingHorizontal: spacing.md, paddingBottom: 24, gap: 12 },
+  loading: { marginTop: 40 },
   event: {
     padding: 20,
     borderRadius: radius.lg,

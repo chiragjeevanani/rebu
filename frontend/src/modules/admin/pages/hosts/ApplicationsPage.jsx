@@ -1,77 +1,86 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CheckCircle2, Clock, Hourglass, Percent } from 'lucide-react'
-import { useStore } from '../../hooks/useStore'
+import { serverTable, useApi, usePaging } from '../../hooks/useApi'
 import { Badge, Card, DataTable, Empty, PageHeader, SearchInput, Stat, Status, Tabs, Who } from '../../components/ui'
-import { ago, dateTime } from '../../utils/format'
+import { ago, dateTime, ms } from '../../utils/format'
 
 const DAY = 86400000
 
 const matchTone = v => (v >= 80 ? 'success' : v >= 70 ? 'warning' : 'danger')
 
-function waitLabel(ms) {
-  const h = ms / 3600000
-  if (h < 1) return `${Math.max(1, Math.round(ms / 60000))}m`
+function waitLabel(t) {
+  const h = t / 3600000
+  if (h < 1) return `${Math.max(1, Math.round(t / 60000))}m`
   if (h < 48) return `${Math.round(h)}h`
   return `${Math.round(h / 24)}d`
 }
 
+function useDebounced(value, delay = 300) {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), delay)
+    return () => clearTimeout(t)
+  }, [value, delay])
+  return v
+}
+
 export default function ApplicationsPage() {
-  const { db } = useStore()
   const navigate = useNavigate()
   const [tab, setTab] = useState('pending')
   const [q, setQ] = useState('')
+  const term = useDebounced(q.trim())
   // Captured once per visit so render stays pure.
   const [now] = useState(() => Date.now())
 
-  const apps = db.applications
-  const by = useMemo(
-    () => ({
-      pending: apps.filter(a => a.status === 'pending'),
-      approved: apps.filter(a => a.status === 'approved'),
-      rejected: apps.filter(a => a.status === 'rejected'),
-    }),
-    [apps],
-  )
+  const pg = usePaging({ status: tab, q: term || undefined }, 20)
+  const res = useApi('/admin/applications', pg.query)
+  const rows = res.data?.items
+  const counts = res.data?.counts || {}
+
+  // Queue stats: up to 100 oldest pending and 100 latest approvals.
+  const pendingRes = useApi('/admin/applications', { status: 'pending', limit: 100 })
+  const approvedRes = useApi('/admin/applications', { status: 'approved', limit: 100 })
 
   const stats = useMemo(() => {
-    const waits = by.pending.map(a => now - a.submittedAt)
-    const decided = by.approved.length + by.rejected.length
+    const waits = (pendingRes.data?.items || []).map(a => now - ms(a.submittedAt))
+    const c = pendingRes.data?.counts || {}
+    const approved = c.approved || 0
+    const decided = approved + (c.rejected || 0)
     return {
       avgWait: waits.length ? waits.reduce((n, w) => n + w, 0) / waits.length : 0,
       oldest: waits.length ? Math.max(...waits) : 0,
-      approved7d: by.approved.filter(a => a.reviewedAt && a.reviewedAt >= now - 7 * DAY).length,
-      rate: decided ? Math.round((by.approved.length / decided) * 100) : 0,
+      approved7d: (approvedRes.data?.items || []).filter(a => a.reviewedAt && ms(a.reviewedAt) >= now - 7 * DAY).length,
+      rate: decided ? Math.round((approved / decided) * 100) : 0,
       decided,
+      pending: c.pending || 0,
     }
-  }, [by, now])
-
-  const rows = useMemo(() => {
-    const t = q.trim().toLowerCase()
-    return by[tab].filter(a => !t || [a.name, a.id, a.phone, a.agencyCode].some(v => String(v || '').toLowerCase().includes(t)))
-  }, [by, tab, q])
+  }, [pendingRes.data, approvedRes.data, now])
 
   const columns = [
-    { key: 'name', label: 'Applicant', sort: a => a.name, render: a => <Who src={a.avatar} name={a.name} sub={`${a.id} · ${a.phone}`} /> },
+    { key: 'name', label: 'Applicant', render: a => <Who src={a.avatar} name={a.name} sub={[a.id, a.phone].filter(Boolean).join(' · ')} /> },
     {
       key: 'submittedAt',
       label: 'Submitted',
-      sort: a => a.submittedAt,
       render: a => (
         <span className="a-nowrap" title={dateTime(a.submittedAt)}>
           {ago(a.submittedAt)}
         </span>
       ),
     },
-    { key: 'age', label: 'Age', align: 'right', sort: a => a.age, render: a => <span className={a.age < 19 ? 'a-warning a-strong' : ''}>{a.age}</span> },
+    { key: 'age', label: 'Age', align: 'right', render: a => <span className={a.age != null && a.age < 19 ? 'a-warning a-strong' : ''}>{a.age ?? '—'}</span> },
     { key: 'gender', label: 'Gender' },
-    { key: 'faceMatch', label: 'Face match', align: 'right', sort: a => a.faceMatch, render: a => <Badge tone={matchTone(a.faceMatch)}>{a.faceMatch}%</Badge> },
+    {
+      key: 'faceMatch',
+      label: 'Face match',
+      align: 'right',
+      render: a => (typeof a.faceMatch === 'number' ? <Badge tone={matchTone(a.faceMatch)}>{a.faceMatch}%</Badge> : <span className="a-faint">—</span>),
+    },
     {
       key: 'flags',
       label: 'Flags',
-      sort: a => a.flags.length,
       render: a =>
-        a.flags.length ? (
+        a.flags?.length ? (
           <span className="a-row wrap" style={{ gap: 4 }}>
             {a.flags.map(f => (
               <Badge key={f} tone="warning">
@@ -89,7 +98,6 @@ export default function ApplicationsPage() {
       : {
           key: 'reviewedAt',
           label: 'Decision',
-          sort: a => a.reviewedAt || 0,
           render: a => (
             <span>
               <Status value={a.status} />
@@ -106,8 +114,8 @@ export default function ApplicationsPage() {
       <PageHeader title="Host applications" subtitle="Review new host sign-ups. Oldest pending applications are shown first." />
 
       <div className="a-grid c4" style={{ marginBottom: 20 }}>
-        <Stat label="Pending" value={by.pending.length} icon={Hourglass} sub={by.pending.length ? `oldest waiting ${waitLabel(stats.oldest)}` : 'Queue is clear'} />
-        <Stat label="Average wait" value={by.pending.length ? waitLabel(stats.avgWait) : '—'} icon={Clock} sub="for pending applications" />
+        <Stat label="Pending" value={stats.pending} icon={Hourglass} sub={stats.pending ? `oldest waiting ${waitLabel(stats.oldest)}` : 'Queue is clear'} />
+        <Stat label="Average wait" value={stats.pending ? waitLabel(stats.avgWait) : '—'} icon={Clock} sub="for pending applications" />
         <Stat label="Approved (7 days)" value={stats.approved7d} icon={CheckCircle2} sub="new hosts this week" />
         <Stat label="Approval rate" value={stats.decided ? `${stats.rate}%` : '—'} icon={Percent} sub={`of ${stats.decided} decided`} />
       </div>
@@ -116,9 +124,9 @@ export default function ApplicationsPage() {
         value={tab}
         onChange={setTab}
         tabs={[
-          { value: 'pending', label: 'Pending', count: by.pending.length },
-          { value: 'approved', label: 'Approved', count: by.approved.length },
-          { value: 'rejected', label: 'Rejected', count: by.rejected.length },
+          { value: 'pending', label: 'Pending', count: counts.pending },
+          { value: 'approved', label: 'Approved', count: counts.approved },
+          { value: 'rejected', label: 'Rejected', count: counts.rejected },
         ]}
       />
 
@@ -127,9 +135,9 @@ export default function ApplicationsPage() {
           key={tab}
           rows={rows}
           columns={columns}
+          {...serverTable(pg, res)}
           onRowClick={a => navigate(`/admin/host-applications/${a.id}`)}
-          initialSort={tab === 'pending' ? { key: 'submittedAt', dir: 'asc' } : { key: 'reviewedAt', dir: 'desc' }}
-          toolbar={<SearchInput value={q} onChange={setQ} placeholder="Name, ID, phone, agency code" />}
+          toolbar={<SearchInput value={q} onChange={setQ} placeholder="Name, ID, agency code" />}
           empty={
             q ? (
               <Empty title="No results" text="Try a different search." />

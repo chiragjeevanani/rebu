@@ -6,7 +6,9 @@ import {
   ArrowUp,
   ChevronLeft,
   ChevronRight,
+  CloudOff,
   Inbox,
+  Loader2,
   Search,
   X,
 } from 'lucide-react'
@@ -292,16 +294,66 @@ export function Tabs({ tabs, value, onChange }) {
   )
 }
 
+/* ---------- Loading & errors ---------- */
+
+/** Placeholder while a request is in flight. */
+export function Loading({ title = 'Loading…', text }) {
+  return <Empty icon={Loader2} title={title} text={text} />
+}
+
+/** A failed request, with an optional retry. */
+export function ErrorState({ error, onRetry, title = 'Couldn’t load this' }) {
+  return (
+    <div className="a-empty">
+      <CloudOff size={34} />
+      <b>{title}</b>
+      <div>{error?.message || String(error || 'Something went wrong.')}</div>
+      {onRetry ? (
+        <div style={{ marginTop: 10 }}>
+          <Button size="sm" onClick={onRetry}>
+            Try again
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/** Full-card wrapper for pages that need data before they can render. */
+export function Pending({ res, children, title }) {
+  if (res.error && res.data === undefined) {
+    return (
+      <div className="a-card">
+        <ErrorState error={res.error} onRetry={res.reload} title={title} />
+      </div>
+    )
+  }
+  if (res.data === undefined) {
+    return (
+      <div className="a-card">
+        <Loading />
+      </div>
+    )
+  }
+  return children(res.data)
+}
+
 /* ---------- Data table ---------- */
 
 /**
- * columns: [{ key, label, render?(row), sort?: (row) => value, align?: 'right', width? }]
+ * columns: [{ key, label, render?(row), sort?: (row) => value, serverSort?: 'field', align?: 'right', width? }]
  * Sorting + pagination are built in; search/filters live in `toolbar`.
  * selectable + bulk(selectedIds, clear) renders a bulk-action bar.
+ *
+ * Server mode (`server`): `rows` is one page; pass total, page (1-based),
+ * onPageChange, sort/onSortChange ({ key, dir } with key = column.serverSort),
+ * loading, error, onRetry. See serverTable() in hooks/useApi.js.
  */
+const NO_ROWS = []
+
 export function DataTable({
   columns,
-  rows,
+  rows: rowsProp,
   rowKey = r => r.id,
   onRowClick,
   pageSize = 12,
@@ -310,38 +362,124 @@ export function DataTable({
   selectable,
   bulk,
   initialSort,
+  server,
+  total,
+  page: serverPage,
+  onPageChange,
+  sort: serverSortState,
+  onSortChange,
+  loading,
+  error,
+  onRetry,
 }) {
-  const [sort, setSort] = useState(initialSort || null) // { key, dir }
+  const [localSort, setLocalSort] = useState(initialSort || null) // { key, dir }
   const [rawPage, setPage] = useState(0)
   const [selected, setSelected] = useState([])
+  const rows = rowsProp || NO_ROWS
 
   const sorted = useMemo(() => {
-    if (!sort) return rows
-    const col = columns.find(c => c.key === sort.key)
+    if (server || !localSort) return rows
+    const col = columns.find(c => c.key === localSort.key)
     if (!col?.sort) return rows
     return [...rows].sort((a, b) => {
       const x = col.sort(a)
       const y = col.sort(b)
       const cmp = typeof x === 'string' ? x.localeCompare(y) : x - y
-      return sort.dir === 'asc' ? cmp : -cmp
+      return localSort.dir === 'asc' ? cmp : -cmp
     })
-  }, [rows, sort, columns])
+  }, [rows, localSort, columns, server])
 
-  const pages = Math.max(1, Math.ceil(sorted.length / pageSize))
+  const count = server ? total || 0 : sorted.length
+  const pages = Math.max(1, Math.ceil(count / pageSize))
   // Filters can shrink the list under the current page; clamp instead of resetting.
-  const page = Math.min(rawPage, pages - 1)
-  const view = sorted.slice(page * pageSize, page * pageSize + pageSize)
+  const page = server ? Math.max(0, (serverPage || 1) - 1) : Math.min(rawPage, pages - 1)
+  const view = server ? rows : sorted.slice(page * pageSize, page * pageSize + pageSize)
+  const goPage = p => (server ? onPageChange?.(p + 1) : setPage(p))
   const ids = view.map(rowKey)
   const allOn = ids.length > 0 && ids.every(id => selected.includes(id))
 
+  const sortKeyOf = col => (server ? col.serverSort : col.sort ? col.key : null)
+  const sort = server ? serverSortState : localSort
   const toggleSort = col => {
-    if (!col.sort) return
-    setSort(s =>
-      s?.key === col.key
-        ? { key: col.key, dir: s.dir === 'asc' ? 'desc' : 'asc' }
-        : { key: col.key, dir: 'desc' },
-    )
+    const key = sortKeyOf(col)
+    if (!key) return
+    const next = sort?.key === key ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'desc' }
+    if (server) onSortChange?.(next)
+    else setLocalSort(next)
   }
+
+  let body
+  if (rows.length === 0 && error) body = <ErrorState error={error} onRetry={onRetry} />
+  else if (rows.length === 0 && loading) body = <Loading />
+  else if (rows.length === 0) body = empty || <Empty title="No results" text="Try a different search or filter." />
+  else
+    body = (
+      <div className="a-table-wrap" style={loading ? { opacity: 0.55, transition: 'opacity .15s' } : undefined} aria-busy={loading || undefined}>
+        <table className="a-table">
+          <thead>
+            <tr>
+              {selectable ? (
+                <th style={{ width: 40 }}>
+                  <input
+                    type="checkbox"
+                    className="a-check"
+                    checked={allOn}
+                    onChange={() =>
+                      setSelected(s =>
+                        allOn ? s.filter(x => !ids.includes(x)) : Array.from(new Set([...s, ...ids])),
+                      )
+                    }
+                    aria-label="Select page"
+                  />
+                </th>
+              ) : null}
+              {columns.map(c => (
+                <th
+                  key={c.key}
+                  className={`${sortKeyOf(c) ? 'sortable' : ''} ${c.align === 'right' ? 'right' : ''}`}
+                  style={{ width: c.width }}
+                  onClick={() => toggleSort(c)}
+                >
+                  {c.label}
+                  {sort && sort.key === sortKeyOf(c) ? (sort.dir === 'asc' ? ' ↑' : ' ↓') : ''}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {view.map(row => {
+              const k = rowKey(row)
+              return (
+                <tr
+                  key={k}
+                  className={`${onRowClick ? 'clickable' : ''} ${selected.includes(k) ? 'selected' : ''}`}
+                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                >
+                  {selectable ? (
+                    <td onClick={e => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        className="a-check"
+                        checked={selected.includes(k)}
+                        onChange={() =>
+                          setSelected(s => (s.includes(k) ? s.filter(x => x !== k) : [...s, k]))
+                        }
+                        aria-label="Select row"
+                      />
+                    </td>
+                  ) : null}
+                  {columns.map(c => (
+                    <td key={c.key} className={c.align === 'right' ? 'right' : ''}>
+                      {c.render ? c.render(row) : row[c.key]}
+                    </td>
+                  ))}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    )
 
   return (
     <>
@@ -356,86 +494,29 @@ export function DataTable({
           </Button>
         </div>
       ) : null}
-      {rows.length === 0 ? (
-        empty || <Empty title="No results" text="Try a different search or filter." />
-      ) : (
-        <div className="a-table-wrap">
-          <table className="a-table">
-            <thead>
-              <tr>
-                {selectable ? (
-                  <th style={{ width: 40 }}>
-                    <input
-                      type="checkbox"
-                      className="a-check"
-                      checked={allOn}
-                      onChange={() =>
-                        setSelected(s =>
-                          allOn ? s.filter(x => !ids.includes(x)) : Array.from(new Set([...s, ...ids])),
-                        )
-                      }
-                      aria-label="Select page"
-                    />
-                  </th>
-                ) : null}
-                {columns.map(c => (
-                  <th
-                    key={c.key}
-                    className={`${c.sort ? 'sortable' : ''} ${c.align === 'right' ? 'right' : ''}`}
-                    style={{ width: c.width }}
-                    onClick={() => toggleSort(c)}
-                  >
-                    {c.label}
-                    {sort?.key === c.key ? (sort.dir === 'asc' ? ' ↑' : ' ↓') : ''}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {view.map(row => {
-                const k = rowKey(row)
-                return (
-                  <tr
-                    key={k}
-                    className={`${onRowClick ? 'clickable' : ''} ${selected.includes(k) ? 'selected' : ''}`}
-                    onClick={onRowClick ? () => onRowClick(row) : undefined}
-                  >
-                    {selectable ? (
-                      <td onClick={e => e.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          className="a-check"
-                          checked={selected.includes(k)}
-                          onChange={() =>
-                            setSelected(s => (s.includes(k) ? s.filter(x => x !== k) : [...s, k]))
-                          }
-                          aria-label="Select row"
-                        />
-                      </td>
-                    ) : null}
-                    {columns.map(c => (
-                      <td key={c.key} className={c.align === 'right' ? 'right' : ''}>
-                        {c.render ? c.render(row) : row[c.key]}
-                      </td>
-                    ))}
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+      {error && rows.length ? (
+        <div className="a-bulk" style={{ color: 'var(--danger)' }}>
+          {error.message || 'Couldn’t refresh this list.'}
+          <span className="a-spacer" />
+          {onRetry ? (
+            <Button size="sm" variant="ghost" onClick={onRetry}>
+              Try again
+            </Button>
+          ) : null}
         </div>
-      )}
-      {rows.length > pageSize ? (
+      ) : null}
+      {body}
+      {count > pageSize ? (
         <div className="a-pager">
           <span>
-            {page * pageSize + 1}–{Math.min(sorted.length, (page + 1) * pageSize)} of {sorted.length}
+            {page * pageSize + 1}–{Math.min(count, (page + 1) * pageSize)} of {count}
           </span>
           <span className="a-spacer" />
-          <Button size="sm" iconOnly icon={ChevronLeft} disabled={page === 0} onClick={() => setPage(p => p - 1)} aria-label="Previous page" />
+          <Button size="sm" iconOnly icon={ChevronLeft} disabled={page === 0} onClick={() => goPage(page - 1)} aria-label="Previous page" />
           <span>
             Page {page + 1} of {pages}
           </span>
-          <Button size="sm" iconOnly icon={ChevronRight} disabled={page >= pages - 1} onClick={() => setPage(p => p + 1)} aria-label="Next page" />
+          <Button size="sm" iconOnly icon={ChevronRight} disabled={page >= pages - 1} onClick={() => goPage(page + 1)} aria-label="Next page" />
         </div>
       ) : null}
     </>

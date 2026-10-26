@@ -4,6 +4,7 @@ import { AudioLines, Video } from 'lucide-react-native';
 import { colors, spacing } from '../../theme';
 import { ROOM_CATEGORIES } from '../../data/social';
 import { useApp } from '../../context/AppContext';
+import { createRoom } from '../../api/rooms';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
 import Txt from '../../components/Txt';
@@ -13,25 +14,31 @@ import Button from '../../components/Button';
 import Segmented from '../../components/Segmented';
 
 export default function CreateRoomScreen({ navigation }) {
-  const { user, addRoom } = useApp();
+  const { user } = useApp();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const first = user.name.split(' ')[0];
   const [title, setTitle] = useState(`${first}’s room`);
   const [welcome, setWelcome] = useState('Welcome! Be kind and have fun 💜');
   const [category, setCategory] = useState('Chat');
   const [kind, setKind] = useState('voice');
 
-  const create = () => {
-    const room = {
-      id: `my${Date.now()}`,
-      title: title.trim() || `${first}’s room`,
-      welcome: welcome.trim(),
-      category,
-      kind,
-      count: 1,
-      cover: user.photos[0],
-    };
-    addRoom(room);
-    navigation.replace('Room', { room });
+  const create = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const r = await createRoom({
+        title: title.trim() || `${first}’s room`,
+        welcome: welcome.trim(),
+        category,
+        kind,
+        cover: user.photos[0],
+      });
+      navigation.replace('Room', r);
+    } catch (e) {
+      setError(e.message);
+      setBusy(false);
+    }
   };
 
   return (
@@ -40,9 +47,15 @@ export default function CreateRoomScreen({ navigation }) {
       edges={['top', 'bottom']}
       footer={
         <View style={styles.footer}>
+          {error ? (
+            <Txt variant="small" color={colors.danger} style={styles.error}>
+              {error}
+            </Txt>
+          ) : null}
           <Button
             title="Create & open room"
-            disabled={!title.trim()}
+            disabled={!title.trim() || busy}
+            loading={busy}
             onPress={create}
           />
         </View>
@@ -107,6 +120,7 @@ export default function CreateRoomScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
+  error: { marginBottom: 8 },
   flex: { flex: 1 },
   body: { paddingHorizontal: spacing.md },
   label: { marginTop: 16, marginBottom: 10 },

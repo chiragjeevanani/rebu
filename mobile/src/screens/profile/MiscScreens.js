@@ -1,5 +1,12 @@
-import React, { useState } from 'react';
-import { FlatList, Pressable, StyleSheet, View } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import {
+  ActivityIndicator,
+  FlatList,
+  Pressable,
+  StyleSheet,
+  View,
+} from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import LinearGradient from 'react-native-linear-gradient';
 import {
   Camera,
@@ -10,7 +17,10 @@ import {
   ShieldCheck,
 } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
-import { HOSTS } from '../../data/mock';
+import { launchCamera } from 'react-native-image-picker';
+import { del, get, post, uploadImage } from '../../api/client';
+import { toAppHost } from '../../api/hosts';
+import { useApp } from '../../context/AppContext';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
 import Txt from '../../components/Txt';
@@ -22,7 +32,22 @@ import { Card } from '../../components/ListRow';
 
 /* ---------- Blocked users ---------- */
 export function BlockedUsersScreen() {
-  const [list, setList] = useState(HOSTS.slice(5, 8));
+  const [list, setList] = useState(null);
+  useFocusEffect(
+    useCallback(() => {
+      get('/me/blocked')
+        .then(r => setList(r.items))
+        .catch(() => setList([]));
+    }, []),
+  );
+  if (!list) {
+    return (
+      <Screen>
+        <Header title="Blocked users" />
+        <ActivityIndicator color={colors.primary} style={{ marginTop: 60 }} />
+      </Screen>
+    );
+  }
   return (
     <Screen>
       <Header
@@ -47,14 +72,20 @@ export function BlockedUsersScreen() {
             <Avatar uri={item.photo} size={50} />
             <View style={{ flex: 1 }}>
               <Txt variant="h3">{item.name}</Txt>
-              <Txt variant="small">Blocked 3 days ago</Txt>
+              <Txt variant="small">
+                {item.isHost ? 'Host' : 'User'}
+                {item.city ? ` · ${item.city}` : ''}
+              </Txt>
             </View>
             <Button
               title="Unblock"
               variant="secondary"
               size="sm"
               full={false}
-              onPress={() => setList(l => l.filter(u => u.id !== item.id))}
+              onPress={() => {
+                setList(l => l.filter(u => u.id !== item.id));
+                del(`/me/blocked/${item.id}`).catch(() => {});
+              }}
             />
           </View>
         )}
@@ -65,12 +96,17 @@ export function BlockedUsersScreen() {
 
 /* ---------- Followers / Following ---------- */
 export function FollowersScreen({ route }) {
+  const { following, toggleFollow } = useApp();
   const [tab, setTab] = useState(route.params?.tab || 'followers');
-  const [following, setFollowing] = useState(['h1', 'h3']);
-  const toggle = id =>
-    setFollowing(f => (f.includes(id) ? f.filter(x => x !== id) : [...f, id]));
-  const data =
-    tab === 'followers' ? HOSTS : HOSTS.filter(h => following.includes(h.id));
+  const [lists, setLists] = useState({});
+  useFocusEffect(
+    useCallback(() => {
+      get(`/me/connections?tab=${tab}&limit=100`)
+        .then(r => setLists(l => ({ ...l, [tab]: r.items.map(toAppHost) })))
+        .catch(() => setLists(l => ({ ...l, [tab]: [] })));
+    }, [tab]),
+  );
+  const data = lists[tab];
   return (
     <Screen>
       <Header title="Connections" />
@@ -83,9 +119,26 @@ export function FollowersScreen({ route }) {
           { key: 'following', label: 'Following' },
         ]}
       />
+      {!data ? (
+        <ActivityIndicator color={colors.primary} style={{ marginTop: 60 }} />
+      ) : null}
       <FlatList
-        data={data}
+        data={data || []}
         keyExtractor={u => u.id}
+        ListEmptyComponent={
+          data ? (
+            <Txt
+              variant="body"
+              color={colors.textMuted}
+              center
+              style={{ marginTop: 60 }}
+            >
+              {tab === 'followers'
+                ? 'No followers yet.'
+                : 'You’re not following anyone yet.'}
+            </Txt>
+          ) : null
+        }
         renderItem={({ item }) => {
           const on = following.includes(item.id);
           return (
@@ -94,7 +147,9 @@ export function FollowersScreen({ route }) {
               <View style={{ flex: 1 }}>
                 <Txt variant="h3">{item.name}</Txt>
                 <Txt variant="small">
-                  @{item.name.toLowerCase()}.{item.age}
+                  {item.isHost ? 'Host' : 'User'}
+                  {item.age ? ` · ${item.age}` : ''}
+                  {item.city ? ` · ${item.city}` : ''}
                 </Txt>
               </View>
               <Button
@@ -102,7 +157,7 @@ export function FollowersScreen({ route }) {
                 variant={on ? 'secondary' : 'primary'}
                 size="sm"
                 full={false}
-                onPress={() => toggle(item.id)}
+                onPress={() => toggleFollow(item.id)}
               />
             </View>
           );
@@ -127,6 +182,31 @@ export function ReportScreen({ navigation, route }) {
   const [reason, setReason] = useState(null);
   const [details, setDetails] = useState('');
   const [done, setDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const { targetType, targetId } = route.params || {};
+  const person = targetType === 'user' || targetType === 'host';
+
+  const submit = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      if (targetId) {
+        await post('/reports', {
+          targetType,
+          targetId,
+          reason,
+          ...(details.trim() && { details: details.trim() }),
+        });
+        if (person) await post(`/me/blocked/${targetId}`).catch(() => {});
+      }
+      setDone(true);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (done) {
     return (
@@ -144,9 +224,10 @@ export function ReportScreen({ navigation, route }) {
             center
             style={{ marginTop: 8 }}
           >
-            Our safety team will review this within 24 hours.{' '}
-            {route.params?.name} has been blocked and won’t be able to contact
-            you.
+            Our safety team will review this within 24 hours.
+            {person
+              ? ` ${route.params?.name} has been blocked and won’t be able to contact you.`
+              : ''}
           </Txt>
         </View>
         <View style={{ padding: spacing.md }}>
@@ -162,10 +243,20 @@ export function ReportScreen({ navigation, route }) {
       edges={['top', 'bottom']}
       footer={
         <View style={{ padding: spacing.md }}>
+          {error ? (
+            <Txt
+              variant="small"
+              color={colors.danger}
+              style={{ marginBottom: 8 }}
+            >
+              {error}
+            </Txt>
+          ) : null}
           <Button
             title="Submit report"
-            disabled={!reason}
-            onPress={() => setDone(true)}
+            disabled={!reason || busy}
+            loading={busy}
+            onPress={submit}
           />
         </View>
       }
@@ -209,7 +300,38 @@ export function ReportScreen({ navigation, route }) {
 
 /* ---------- Verification ---------- */
 export function VerificationScreen({ navigation }) {
-  const [step, setStep] = useState(0);
+  const { user, refreshMe } = useApp();
+  const verified = user.verified;
+  const pending = user.server?.verification?.status === 'pending';
+  const rejected = user.server?.verification?.status === 'rejected';
+  // 0 selfie · 1 sent for review · 2 verified
+  const step = verified ? 3 : pending ? 2 : 0;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const takeSelfie = async () => {
+    setError('');
+    const r = await launchCamera({
+      mediaType: 'photo',
+      cameraType: 'front',
+      quality: 0.7,
+      maxWidth: 1080,
+      maxHeight: 1080,
+      saveToPhotos: false,
+    });
+    const uri = r.assets?.[0]?.uri;
+    if (!uri) return;
+    setBusy(true);
+    try {
+      const url = await uploadImage(uri);
+      await post('/me/verification', { selfie: url });
+      await refreshMe();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
   const steps = [
     {
       icon: ScanFace,
@@ -218,8 +340,8 @@ export function VerificationScreen({ navigation }) {
     },
     {
       icon: IdCard,
-      title: 'Government ID (optional)',
-      body: 'Hosts must verify with Aadhaar / PAN to enable withdrawals.',
+      title: 'Safety team review',
+      body: 'We compare your selfie with your profile photos, usually within 24 hours.',
     },
     {
       icon: ShieldCheck,
@@ -238,8 +360,22 @@ export function VerificationScreen({ navigation }) {
           <View style={styles.selfieFrame}>
             <Camera size={40} color={colors.white} />
           </View>
-          <Txt style={styles.verifyTitle}>Show everyone you’re real</Txt>
-          <Txt style={styles.verifySub}>Takes less than a minute</Txt>
+          <Txt style={styles.verifyTitle}>
+            {verified
+              ? 'You’re verified ✅'
+              : pending
+              ? 'Selfie under review'
+              : 'Show everyone you’re real'}
+          </Txt>
+          <Txt style={styles.verifySub}>
+            {verified
+              ? 'Your profile shows the blue tick'
+              : pending
+              ? 'We’ll notify you when it’s done'
+              : rejected
+              ? 'Last selfie didn’t match — try again in good light'
+              : 'Takes less than a minute'}
+          </Txt>
         </LinearGradient>
         {steps.map((s, i) => (
           <Card
@@ -269,11 +405,21 @@ export function VerificationScreen({ navigation }) {
         ))}
       </View>
       <View style={{ padding: spacing.md }}>
+        {error ? (
+          <Txt
+            variant="small"
+            color={colors.danger}
+            style={{ marginBottom: 8 }}
+          >
+            {error}
+          </Txt>
+        ) : null}
         <Button
-          title={
-            step >= 2 ? 'Done' : step === 0 ? 'Start verification' : 'Continue'
-          }
-          onPress={() => (step >= 2 ? navigation.goBack() : setStep(step + 1))}
+          title={step >= 2 ? 'Done' : 'Take a selfie'}
+          icon={step >= 2 ? undefined : Camera}
+          loading={busy}
+          disabled={busy}
+          onPress={() => (step >= 2 ? navigation.goBack() : takeSelfie())}
         />
       </View>
     </Screen>
@@ -371,26 +517,66 @@ const CONTENT = {
   },
 };
 
+const MONTH_NAMES = 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split(' ');
+
+/** Admin page body → [heading, text] cards (blank line = new card, "# " = heading). */
+function toSections(title, body) {
+  return body
+    .split(/\n\s*\n/)
+    .map(block => block.trim())
+    .filter(Boolean)
+    .map(block => {
+      const [first, ...rest] = block.split('\n');
+      return /^#+\s/.test(first)
+        ? [first.replace(/^#+\s*/, ''), rest.join('\n').trim()]
+        : ['', block];
+    })
+    .map(([h, b], i) => [h || (i === 0 ? title : ''), b]);
+}
+
 export function ContentScreen({ route }) {
-  const page = CONTENT[route.params?.page] || CONTENT.help;
+  const slug = route.params?.page || 'help';
+  const [remote, setRemote] = useState(null);
+  useFocusEffect(
+    useCallback(() => {
+      get(`/content/pages/${slug}`)
+        .then(r => setRemote(r.page))
+        .catch(() => setRemote(null)); // not published yet → bundled copy
+    }, [slug]),
+  );
+  const local = CONTENT[slug] || CONTENT.help;
+  const page = remote
+    ? {
+        title: remote.title,
+        sections: toSections(remote.title, remote.body || ''),
+        updated: remote.updated,
+      }
+    : local;
+  const updated = page.updated ? new Date(page.updated) : null;
   return (
     <Screen scroll>
       <Header title={page.title} />
       <View style={{ paddingHorizontal: spacing.md, gap: 12 }}>
-        {page.sections.map(([h, b]) => (
-          <Card key={h}>
-            <Txt variant="h3">{h}</Txt>
-            <Txt
-              variant="body"
-              color={colors.textMuted}
-              style={{ marginTop: 6 }}
-            >
-              {b}
-            </Txt>
+        {page.sections.map(([h, b], i) => (
+          <Card key={`${i}${h}`}>
+            {h ? <Txt variant="h3">{h}</Txt> : null}
+            {b ? (
+              <Txt
+                variant="body"
+                color={colors.textMuted}
+                style={{ marginTop: h ? 6 : 0 }}
+              >
+                {b}
+              </Txt>
+            ) : null}
           </Card>
         ))}
         <Txt variant="tiny" center style={{ marginTop: 8 }}>
-          Last updated 24 Oct 2026
+          {updated
+            ? `Last updated ${updated.getDate()} ${
+                MONTH_NAMES[updated.getMonth()]
+              } ${updated.getFullYear()}`
+            : 'Last updated 24 Oct 2026'}
         </Txt>
       </View>
     </Screen>

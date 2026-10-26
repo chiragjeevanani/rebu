@@ -2,14 +2,12 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowRight, CircleCheck, Download, HandCoins, IndianRupee, Percent, RotateCcw, UsersRound, Wallet } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
-import { Button, Card, Empty, PageHeader, Seg, Stat } from '../../components/ui'
+import { useApi } from '../../hooks/useApi'
+import { Button, Card, Empty, PageHeader, Pending, Seg, Stat } from '../../components/ui'
 import { BarList, TrendChart } from '../../components/charts'
-import { compact, date, exportCsv, inr, num, pct } from '../../utils/format'
+import { compact, date, exportCsv, inr, label, num, pct, withDayLabels } from '../../utils/format'
 
-const DAY = 86400000
-const sum = (list, key) => list.reduce((n, x) => n + (Number(x[key]) || 0), 0)
-// Only report a trend when there is a full previous period to compare with.
-const trend = (cur, prev, ok) => (ok && prev ? ((cur - prev) / prev) * 100 : null)
+const trend = (cur, prev) => (prev ? ((cur - prev) / prev) * 100 : null)
 
 const SOURCES = [
   ['video', 'Video calls'],
@@ -20,97 +18,57 @@ const SOURCES = [
 ]
 
 const packLabel = p => `${num(p.coins)}${p.bonus ? ` + ${num(p.bonus)}` : ''} coins · ${inr(p.price)}`
-
-/** Payment-record KPIs for one time window. */
-function txKpis(list) {
-  const ok = list.filter(t => t.status === 'success')
-  const settled = list.filter(t => t.status !== 'pending')
-  // A refunded payment was captured first, so it counts as a successful attempt.
-  const captured = settled.filter(t => t.status === 'success' || t.status === 'refunded')
-  const refunded = list.filter(t => t.status === 'refunded')
-  const paying = new Set(ok.map(t => t.userId)).size
-  const revenue = sum(ok, 'amount')
-  return {
-    paying,
-    arppu: paying ? revenue / paying : 0,
-    successRate: settled.length ? (captured.length / settled.length) * 100 : 0,
-    attempts: settled.length,
-    refunds: sum(refunded, 'amount'),
-    refundCount: refunded.length,
-  }
-}
-
-function groupSum(list, keyOf, valueOf) {
-  const out = {}
-  for (const x of list) {
-    const k = keyOf(x)
-    out[k] = (out[k] || 0) + valueOf(x)
-  }
-  return out
-}
+const sumCount = (totals, keys) => keys.reduce((n, k) => n + (totals?.[k]?.count || 0), 0)
 
 export default function RevenuePage() {
-  const { db } = useStore()
   const [range, setRange] = useState(7)
-  const [now] = useState(() => Date.now())
-  const { economy, coinPacks } = db.config
+  const res = useApi('/admin/finance/revenue', { days: range })
+  // Payment counts by status for the success rate; successful payments for paying users.
+  const tx = useApi('/admin/finance/transactions', { days: range, limit: 1 })
+  const paidTx = useApi('/admin/finance/transactions', { days: range, status: 'success', limit: 100 })
 
-  const m = db.metrics
-  const cur = m.slice(-range)
-  const prev = m.slice(-range * 2, -range)
-  const hasPrev = prev.length === cur.length
-
-  const k = useMemo(() => {
-    const revenue = sum(cur, 'revenue')
-    const payouts = sum(cur, 'hostPayouts')
-    const net = revenue - payouts
-    const pRevenue = sum(prev, 'revenue')
-    const pPayouts = sum(prev, 'hostPayouts')
-    const pNet = pRevenue - pPayouts
-    return {
-      revenue,
-      payouts,
-      net,
-      take: revenue ? (net / revenue) * 100 : 0,
-      prevTake: pRevenue ? (pNet / pRevenue) * 100 : 0,
-      revenueT: trend(revenue, pRevenue, hasPrev),
-      payoutsT: trend(payouts, pPayouts, hasPrev),
-      netT: trend(net, pNet, hasPrev),
-    }
-  }, [cur, prev, hasPrev])
-
-  const since = now - range * DAY
-  const txCur = useMemo(() => db.transactions.filter(t => t.ts >= since), [db.transactions, since])
-  const txPrev = useMemo(
-    () => db.transactions.filter(t => t.ts >= since - range * DAY && t.ts < since),
-    [db.transactions, since, range],
+  return (
+    <Pending res={res}>
+      {r => <Body r={r} range={range} setRange={setRange} totals={tx.data?.totals} paid={paidTx.data} />}
+    </Pending>
   )
-  // Payment records only go back ~30 days, so a 30-day window has no comparable previous period.
-  const txHasPrev = range < 30 && txPrev.length > 0
-  const tk = txKpis(txCur)
-  const tp = txKpis(txPrev)
+}
 
-  const paid = txCur.filter(t => t.status === 'success')
+function Body({ r, range, setRange, totals, paid }) {
+  const { db } = useStore()
+  const { economy, coinPacks } = db.config
+  const cur = useMemo(() => withDayLabels(r.byDay), [r.byDay])
+
+  // REBU keeps what users spend minus what hosts are credited.
+  const hostNet = r.earnings.hostNet
+  const k = {
+    revenue: r.revenue,
+    revenueT: trend(r.revenue, r.previousRevenue),
+    payouts: hostNet,
+    net: r.revenue - hostNet,
+    take: r.takeRate,
+  }
+
+  // Paying users / ARPPU from successful payments in the window.
+  // TODO(api): exact distinct paying-user count when there are more than 100 payments —
+  // want GET /admin/finance/revenue → { payingUsers, arppu, successRate } alongside the rest.
+  const paying = paid ? new Set(paid.items.map(t => t.userId)).size : 0
+  const payingExact = paid ? paid.total <= paid.items.length : true
+  const arppu = paying ? paid.items.reduce((n, t) => n + t.amount, 0) / paying : 0
+  const captured = sumCount(totals, ['success', 'refunded'])
+  const attempts = captured + sumCount(totals, ['failed'])
+  const successRate = attempts ? (captured / attempts) * 100 : 0
+
   const byPack = useMemo(() => {
     const packs = Object.fromEntries(coinPacks.map(p => [p.id, p]))
-    const totals = groupSum(paid, t => t.packId, t => t.amount)
-    return Object.entries(totals)
-      .map(([id, value]) => {
-        const p = packs[id]
-        const tx = paid.find(t => t.packId === id)
-        const base = p ? packLabel(p) : packLabel({ coins: tx.coins, bonus: tx.bonus, price: tx.amount })
-        return { label: p?.firstRecharge ? `${base} (first recharge)` : base, value }
-      })
-      .sort((a, b) => b.value - a.value)
-  }, [paid, coinPacks])
+    return r.byPack.map(x => {
+      const p = packs[x.packId]
+      const base = p ? packLabel(p) : `Pack ${x.packId || '—'}`
+      return { label: p?.firstRecharge ? `${base} (first recharge)` : base, value: x.revenue }
+    })
+  }, [r.byPack, coinPacks])
 
-  const byMethod = useMemo(
-    () =>
-      Object.entries(groupSum(paid, t => t.method, t => t.amount))
-        .map(([label, value]) => ({ label, value }))
-        .sort((a, b) => b.value - a.value),
-    [paid],
-  )
+  const byMethod = r.byMethod.map(m => ({ label: label(m.method), value: m.revenue }))
 
   const hostShare = src => 100 - (economy.commission[src] ?? 0)
 
@@ -135,8 +93,8 @@ export default function RevenuePage() {
                 exportCsv(`rebu-revenue-${range}d.csv`, cur, [
                   { label: 'Date', value: d => date(d.day) },
                   { label: 'Revenue (INR)', value: d => d.revenue },
-                  { label: 'Host payouts (INR)', value: d => d.hostPayouts },
-                  { label: 'REBU net (INR)', value: d => d.revenue - d.hostPayouts },
+                  { label: 'Payments', value: d => d.payments },
+                  { label: 'Withdrawals paid (INR)', value: d => d.payouts },
                   { label: 'Coins sold', value: d => d.coinsSold },
                 ])
               }
@@ -149,39 +107,29 @@ export default function RevenuePage() {
 
       <div className="a-grid c4">
         <Stat label="Gross revenue" value={inr(k.revenue)} trend={k.revenueT} sub={k.revenueT == null ? `last ${range} days` : 'vs previous period'} icon={IndianRupee} />
-        <Stat label="Est. REBU net" value={inr(k.net)} trend={k.netT} sub="revenue − host payouts" icon={Wallet} />
-        <Stat label="Host payouts" value={inr(k.payouts)} trend={k.payoutsT} sub={k.payoutsT == null ? 'credited to hosts' : 'vs previous period'} icon={HandCoins} />
-        <Stat
-          label="Take rate"
-          value={pct(k.take, 1)}
-          sub={hasPrev ? `was ${pct(k.prevTake, 1)} the period before` : 'net ÷ gross revenue'}
-          icon={Percent}
-        />
+        <Stat label="Est. REBU net" value={inr(k.net)} sub="revenue − host earnings" icon={Wallet} />
+        <Stat label="Host earnings" value={inr(k.payouts)} sub={`credited to hosts · ${inr(r.payouts.paid.amount)} paid out`} icon={HandCoins} />
+        <Stat label="Take rate" value={pct(k.take, 1)} sub="REBU commission ÷ host gross" icon={Percent} />
       </div>
 
       <div className="a-grid c4">
-        <Stat label="Paying users" value={num(tk.paying)} trend={trend(tk.paying, tp.paying, txHasPrev)} sub="with a successful payment" icon={UsersRound} />
-        <Stat label="ARPPU" value={inr(Math.round(tk.arppu))} trend={trend(tk.arppu, tp.arppu, txHasPrev)} sub="revenue per paying user" icon={IndianRupee} />
-        <Stat
-          label="Payment success rate"
-          value={pct(tk.successRate, 1)}
-          sub={`${num(tk.attempts)} completed attempts${txHasPrev ? ` · was ${pct(tp.successRate, 1)}` : ''}`}
-          icon={CircleCheck}
-        />
-        <Stat label="Refunds" value={inr(tk.refunds)} sub={`${num(tk.refundCount)} payment${tk.refundCount === 1 ? '' : 's'} refunded`} icon={RotateCcw} />
+        <Stat label="Paying users" value={`${num(paying)}${payingExact ? '' : '+'}`} sub="with a successful payment" icon={UsersRound} />
+        <Stat label="ARPPU" value={inr(Math.round(arppu))} sub={payingExact ? 'revenue per paying user' : 'from the latest 100 payments'} icon={IndianRupee} />
+        <Stat label="Payment success rate" value={pct(successRate, 1)} sub={`${num(attempts)} completed attempts`} icon={CircleCheck} />
+        <Stat label="Refunds" value={inr(r.refunds.amount)} sub={`${num(r.refunds.count)} payment${r.refunds.count === 1 ? '' : 's'} refunded`} icon={RotateCcw} />
       </div>
 
       <div className="a-grid c2">
         <Card title="Revenue per day" subtitle={`Coin sales · last ${range} days`}>
           <TrendChart data={cur} series={[{ key: 'revenue', label: 'Revenue' }]} format={v => inr(v)} yFormat={v => `₹${compact(v)}`} />
         </Card>
-        <Card title="Revenue vs host payouts" subtitle="The gap is what REBU keeps">
+        <Card title="Revenue vs host payouts" subtitle="Coin sales vs withdrawals paid to hosts">
           <TrendChart
             type="line"
             data={cur}
             series={[
               { key: 'revenue', label: 'Revenue' },
-              { key: 'hostPayouts', label: 'Host payouts' },
+              { key: 'payouts', label: 'Host payouts' },
             ]}
             format={v => inr(v)}
             yFormat={v => `₹${compact(v)}`}

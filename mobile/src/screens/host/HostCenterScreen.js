@@ -1,12 +1,12 @@
 // Host Center: everything an approved host does — go online, go live, set
 // prices, see today's earnings, level up, daily tasks, agency and payouts.
 // Also used as the "Host" tab for approved hosts.
-import React, { useMemo, useState } from 'react';
-import { Image, Pressable, StyleSheet, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
+import { Alert, Image, Pressable, StyleSheet, View } from 'react-native';
 import {
   BookOpen,
   Building2,
-  ChevronRight,
   Clock3,
   Gem,
   Lock,
@@ -28,8 +28,7 @@ import Sheet from '../../components/Sheet';
 import RateChips from '../../components/RateChips';
 import ListRow, { Card } from '../../components/ListRow';
 import { CoinIcon } from '../../components/CoinPill';
-
-const today = () => new Date().toDateString();
+import { get, post } from '../../api/client';
 
 function Stat({ label, value }) {
   return (
@@ -60,12 +59,10 @@ export default function HostCenterScreen({ navigation, tab }) {
     setHostOnline,
     earnings,
     balance,
-    liveSessions,
-    hostTasks,
-    setHostTasks,
     hostAgency,
     setHostAgency,
-    addEarning,
+    refreshHostMoney,
+    hostInfo,
   } = useApp();
   const [sheet, setSheet] = useState(null); // prices | level | agency
   const [draft, setDraft] = useState(hostRates);
@@ -80,51 +77,59 @@ export default function HostCenterScreen({ navigation, tab }) {
     const calls = list.filter(
       e => e.source === 'video' || e.source === 'voice',
     );
-    const liveSecs = liveSessions
-      .filter(s => daysAgo(s.ts) === 0)
-      .reduce((n, s) => n + s.seconds, 0);
     return {
       net: list.reduce((n, e) => n + split(e).net, 0),
       calls: calls.length,
       callMin: calls.reduce((n, e) => n + (e.minutes || 0), 0),
-      liveMin: Math.floor(liveSecs / 60),
+      liveMin: 0,
+      // The server counts calls (one call can bill in several rows).
+      ...(hostInfo?.today && {
+        net: hostInfo.today.net,
+        calls: hostInfo.today.calls,
+        callMin: hostInfo.today.callMinutes,
+        liveMin: hostInfo.today.liveMinutes,
+      }),
     };
-  }, [earnings, liveSessions]);
+  }, [earnings, hostInfo]);
 
-  const claimed = hostTasks.day === today() ? hostTasks.claimed : [];
-  const tasks = [
-    {
-      id: 'calls',
-      title: 'Answer 3 calls',
-      done: t.calls,
-      goal: 3,
-      reward: 50,
-    },
-    {
-      id: 'live',
-      title: 'Go live for 10 minutes',
-      done: t.liveMin,
-      goal: 10,
-      reward: 80,
-      unit: 'min',
-    },
-    {
-      id: 'earn',
-      title: 'Earn ₹200 today',
-      done: Math.floor(t.net),
-      goal: 200,
-      reward: 100,
-      money: true,
-    },
-  ];
-  const claim = task => {
-    addEarning({
-      source: 'bonus',
-      from: 'REBU',
-      detail: `Daily task: ${task.title}`,
-      coins: task.reward,
-    });
-    setHostTasks({ day: today(), claimed: [...claimed, task.id] });
+  // Daily tasks: progress and claims are the server's (rewards land as bonus earnings).
+  const [tasks, setTasks] = useState([]);
+  const [claiming, setClaiming] = useState(null);
+  const loadTasks = useCallback(
+    () =>
+      get('/tasks')
+        .then(r =>
+          setTasks(
+            r.host.map(x => ({
+              ...x,
+              done: x.progress,
+              money: x.id === 'h_earn',
+              unit: x.id === 'h_live' ? 'min' : '',
+            })),
+          ),
+        )
+        .catch(() => {}),
+    [],
+  );
+  useFocusEffect(
+    useCallback(() => {
+      loadTasks();
+    }, [loadTasks]),
+  );
+  // Progress moves with calls / lives / earnings.
+  useEffect(() => {
+    loadTasks();
+  }, [hostInfo, loadTasks]);
+  const claim = async task => {
+    setClaiming(task.id);
+    try {
+      await post(`/tasks/${task.id}/claim`);
+      await Promise.all([loadTasks(), refreshHostMoney()]);
+    } catch (e) {
+      Alert.alert('Couldn’t claim', e.message);
+    } finally {
+      setClaiming(null);
+    }
   };
 
   const photo = hostApp.data?.photos?.[0] || user.photos[0];
@@ -228,7 +233,6 @@ export default function HostCenterScreen({ navigation, tab }) {
                 <View style={styles.price}>
                   <CoinIcon size={16} />
                   <Txt variant="label">{hostRates[k]}/min</Txt>
-                  <ChevronRight size={18} color={colors.textFaint} />
                 </View>
               }
               onPress={() => {
@@ -277,7 +281,7 @@ export default function HostCenterScreen({ navigation, tab }) {
         <Card>
           {tasks.map((task, i) => {
             const done = task.done >= task.goal;
-            const got = claimed.includes(task.id);
+            const got = task.claimed;
             return (
               <View key={task.id} style={i > 0 && styles.taskGap}>
                 <View style={styles.taskHead}>
@@ -299,7 +303,7 @@ export default function HostCenterScreen({ navigation, tab }) {
                     </Txt>
                   ) : (
                     <Pressable
-                      disabled={!done}
+                      disabled={!done || !!claiming}
                       onPress={() => claim(task)}
                       style={[styles.claim, !done && styles.claimOff]}
                     >
@@ -383,10 +387,11 @@ export default function HostCenterScreen({ navigation, tab }) {
         <Button
           title="Save prices"
           style={styles.sheetGap}
-          onPress={() => {
-            setHostRates(draft);
-            setSheet(null);
-          }}
+          onPress={() =>
+            setHostRates(draft)
+              .then(() => setSheet(null))
+              .catch(e => Alert.alert('Couldn’t save prices', e.message))
+          }
         />
       </Sheet>
 
@@ -451,10 +456,11 @@ export default function HostCenterScreen({ navigation, tab }) {
               title="Leave agency"
               variant="outline"
               style={styles.sheetGap}
-              onPress={() => {
-                setHostAgency(null);
-                setSheet(null);
-              }}
+              onPress={() =>
+                setHostAgency(null)
+                  .then(() => setSheet(null))
+                  .catch(e => Alert.alert('Couldn’t leave', e.message))
+              }
             />
           </>
         ) : (
@@ -476,10 +482,11 @@ export default function HostCenterScreen({ navigation, tab }) {
               title="Join agency"
               disabled={code.length < 4}
               style={styles.sheetGap}
-              onPress={() => {
-                setHostAgency(code);
-                setSheet(null);
-              }}
+              onPress={() =>
+                setHostAgency(code.trim())
+                  .then(() => setSheet(null))
+                  .catch(e => Alert.alert('Couldn’t join agency', e.message))
+              }
             />
           </>
         )}

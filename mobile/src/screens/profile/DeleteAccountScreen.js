@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Alert, StyleSheet, View } from 'react-native';
 import { TriangleAlert } from 'lucide-react-native';
 import { colors, radius, spacing } from '../../theme';
 import { useApp } from '../../context/AppContext';
@@ -50,7 +50,11 @@ export default function DeleteAccountScreen({ navigation }) {
             title="Delete my account permanently"
             variant="danger"
             disabled={!ready}
-            onPress={deleteAccount}
+            onPress={() =>
+              deleteAccount().catch(e =>
+                Alert.alert('Couldn’t delete account', e.message),
+              )
+            }
           />
           <Button
             title="Keep my account"

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { AlertTriangle, Calculator, Coins, Percent, Save, Undo2, Users, Wallet } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { errorText } from '../../api/client'
 import { Badge, Button, Card, Field, Input, PageHeader, Select, Setting, Switch } from '../../components/ui'
 import { inr, num, pct } from '../../utils/format'
 
@@ -62,7 +63,7 @@ function validate(f, v, values) {
 }
 
 /** Sticky "unsaved changes" bar shared by draft-style settings pages. */
-function SaveBar({ count, invalid, onDiscard, onSave }) {
+function SaveBar({ count, invalid, saving, onDiscard, onSave }) {
   return (
     <div
       className="a-row wrap"
@@ -90,8 +91,8 @@ function SaveBar({ count, invalid, onDiscard, onSave }) {
       <Button icon={Undo2} onClick={onDiscard}>
         Discard
       </Button>
-      <Button variant="primary" icon={Save} disabled={!!invalid} onClick={onSave}>
-        Save
+      <Button variant="primary" icon={Save} disabled={!!invalid || saving} onClick={onSave}>
+        {saving ? 'Saving…' : 'Save'}
       </Button>
     </div>
   )
@@ -103,6 +104,7 @@ export default function EconomyPage() {
   const economy = db.config.economy
   const [form, setForm] = useState(() => toForm(economy))
   const [calc, setCalc] = useState({ source: 'video', coins: '40', agency: false })
+  const [saving, setSaving] = useState(false)
 
   const fieldByPath = useMemo(() => Object.fromEntries(FIELDS.map(f => [f.path, f])), [])
   const values = useMemo(
@@ -131,12 +133,19 @@ export default function EconomyPage() {
 
   const set = (path, v) => setForm(f => ({ ...f, [path]: v }))
 
-  const save = () => {
+  const save = async () => {
     let next = economy
     for (const f of FIELDS) next = setPath(next, f.path, values[f.path])
-    const summary = changed.map(f => `${f.label.toLowerCase()} ${show(f, get(economy, f.path))} → ${show(f, values[f.path])}`)
-    setConfig('economy', next, [`Updated economy: ${summary.join(', ')}`, 'Economy'])
-    toast(`Economy saved · ${changed.length} change${changed.length === 1 ? '' : 's'}`)
+    setSaving(true)
+    try {
+      const saved = await setConfig('economy', next)
+      setForm(toForm(saved))
+      toast(`Economy saved · ${changed.length} change${changed.length === 1 ? '' : 's'}`)
+    } catch (e) {
+      toast(errorText(e), 'error')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const discard = () => setForm(toForm(economy))
@@ -245,6 +254,8 @@ export default function EconomyPage() {
               {field('messageCost', { affix: 'coins', hint: 'Charged per chat message' })}
             </div>
           </Card>
+
+          <DiamondsCard />
         </div>
 
         <div className="a-stack" style={{ position: 'sticky', top: 'calc(var(--topbar) + 16px)' }}>
@@ -305,8 +316,50 @@ export default function EconomyPage() {
         </div>
       </div>
 
-      {dirty ? <SaveBar count={changed.length} invalid={invalid} onDiscard={discard} onSave={save} /> : null}
+      {dirty ? <SaveBar count={changed.length} invalid={invalid} saving={saving} onDiscard={discard} onSave={save} /> : null}
     </>
+  )
+}
+
+/** config.diamondsPerCoin: its own config key, so it saves on its own. */
+function DiamondsCard() {
+  const { db, setConfig } = useStore()
+  const toast = useToast()
+  const current = db.config.diamondsPerCoin
+  const [value, setValue] = useState(() => String(current ?? ''))
+  const [saving, setSaving] = useState(false)
+  const n = Number(value)
+  const error = !Number.isInteger(n) || n < 1 || n > 100 ? 'Whole number, 1–100' : null
+  const dirty = n !== current
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      const saved = await setConfig('diamondsPerCoin', n)
+      setValue(String(saved))
+      toast('Diamond rate saved')
+    } catch (e) {
+      toast(errorText(e), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (current === undefined) return null
+  return (
+    <Card
+      title="Diamonds"
+      subtitle="How gifted coins convert to diamonds"
+      actions={
+        <Button size="sm" variant="primary" icon={Save} disabled={!dirty || !!error || saving} onClick={save}>
+          {saving ? 'Saving…' : 'Save'}
+        </Button>
+      }
+    >
+      <Field label="Diamonds per coin" error={value.trim() ? error : 'Required'} hint="Diamonds per coin gifted" style={{ maxWidth: 240 }}>
+        <Input type="number" min="1" max="100" affix="💎" value={value} onChange={e => setValue(e.target.value)} />
+      </Field>
+    </Card>
   )
 }
 

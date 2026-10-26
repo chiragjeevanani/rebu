@@ -2,6 +2,7 @@
 // (accept up to 2 guests on video) and an end-live confirmation.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Alert,
   BackHandler,
   Image,
   KeyboardAvoidingView,
@@ -33,76 +34,23 @@ import {
   X,
 } from 'lucide-react-native';
 import { colors, fonts } from '../../theme';
-import { GIFTS } from '../../data/mock';
 import { useApp } from '../../context/AppContext';
 import { num } from '../../utils/format';
+import Avatar from '../../components/Avatar';
 import Txt from '../../components/Txt';
 import Sheet from '../../components/Sheet';
 import Button from '../../components/Button';
 import ListRow from '../../components/ListRow';
-import LiveCamera from '../../components/LiveCamera';
 import { useSecureScreen } from '../../utils/secure';
-import { split } from '../../data/economy';
+import { RtcSurfaceView, RtcTextureView } from 'react-native-agora';
+import { get, post } from '../../api/client';
+import { useSocketEvent } from '../../api/socket';
+import { useAgoraChannel } from '../../media/agora';
 import { hapticLight } from '../../utils/haptics';
 
 const MAX_GUESTS = 2;
 
 // Demo audience until the streaming backend exists.
-const VIEWERS = [
-  {
-    id: 'v1',
-    name: 'Rahul',
-    level: 12,
-    photo: 'https://i.pravatar.cc/200?img=11',
-  },
-  {
-    id: 'v2',
-    name: 'Vikram',
-    level: 7,
-    photo: 'https://i.pravatar.cc/200?img=13',
-  },
-  {
-    id: 'v3',
-    name: 'Karan',
-    level: 21,
-    photo: 'https://i.pravatar.cc/200?img=14',
-  },
-  {
-    id: 'v4',
-    name: 'Aditya',
-    level: 4,
-    photo: 'https://i.pravatar.cc/200?img=15',
-  },
-  {
-    id: 'v5',
-    name: 'Sahil',
-    level: 9,
-    photo: 'https://i.pravatar.cc/200?img=33',
-  },
-  {
-    id: 'v6',
-    name: 'Dev',
-    level: 16,
-    photo: 'https://i.pravatar.cc/200?img=52',
-  },
-  {
-    id: 'v7',
-    name: 'Arjun',
-    level: 3,
-    photo: 'https://i.pravatar.cc/200?img=59',
-  },
-];
-const LINES = [
-  'Hi 👋',
-  'Hello from Delhi!',
-  'Nice to see you live 😊',
-  'Can I join?',
-  'What are you doing today?',
-  'Good evening ✨',
-  'Love the vibe',
-  'Where are you from?',
-];
-const pick = (list, n) => list[n % list.length];
 const clock = s =>
   `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(
     2,
@@ -112,17 +60,15 @@ const clock = s =>
 export default function MyLiveScreen({ navigation, route }) {
   useSecureScreen();
   const insets = useSafeAreaInsets();
-  const { user, isHost, hostAgency, addEarning, addLiveSession } = useApp();
+  const { user, refreshHostMoney } = useApp();
   const { title, premium, ticket, allowGuests, cover } = route.params;
 
-  const [position, setPosition] = useState(route.params.position || 'front');
+  const [liveId, setLiveId] = useState(null);
+  const [agora, setAgora] = useState(null);
   const [muted, setMuted] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [viewers, setViewers] = useState(0);
-  const [peak, setPeak] = useState(0);
-  const [totalViewers, setTotalViewers] = useState(0);
   const [diamonds, setDiamonds] = useState(0);
-  const [followers, setFollowers] = useState(0);
   const [gifters, setGifters] = useState({});
   const [chat, setChat] = useState([
     {
@@ -136,68 +82,111 @@ export default function MyLiveScreen({ navigation, route }) {
   const [typing, setTyping] = useState(false);
   const [text, setText] = useState('');
   const [sheet, setSheet] = useState(null); // requests | more | end | gifters
-  const tick = useRef(0);
-  const guestsRef = useRef(guests);
-  guestsRef.current = guests;
+  const [ending, setEnding] = useState(false);
   const scroll = useRef(null);
+  const liveRef = useRef(null);
+  const done = useRef(false);
+
+  const rtc = useAgoraChannel(agora, { video: true });
 
   const say = entry =>
     setChat(c => [
       ...c.slice(-40),
-      { id: `${Date.now()}${Math.random()}`, ...entry },
+      { id: entry.id || `${Date.now()}${Math.random()}`, ...entry },
     ]);
+  const fromServer = m =>
+    m.kind === 'gift'
+      ? { id: m.id, name: m.user?.name, photo: m.user?.photo, gift: m.gift }
+      : m.kind === 'system'
+      ? { id: m.id, system: true, text: m.text }
+      : { id: m.id, name: m.user?.name, photo: m.user?.photo, text: m.text };
+  const person = (u, extra) => ({
+    id: u.id,
+    name: u.name,
+    photo: u.photo,
+    level: u.vip || 0,
+    ...extra,
+  });
+
+  // Start the live on the server; it hands back a publisher token.
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await post('/lives', {
+          mode: premium ? 'premium' : 'live',
+          title,
+          // A live this phone lost track of (app killed) is closed first.
+          replace: true,
+          allowGuests,
+          ...(premium && { ticket }),
+          ...(/^https?:/.test(cover || '') && { cover }),
+        });
+        liveRef.current = r.live.id;
+        setLiveId(r.live.id);
+        setAgora(r.agora);
+      } catch (e) {
+        Alert.alert('Couldn’t go live', e.message);
+        navigation.goBack();
+      }
+    })();
+    // Leaving the screen any other way still ends the live.
+    return () => {
+      if (!done.current && liveRef.current) {
+        post(`/lives/${liveRef.current}/end`).catch(() => {});
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Live timer
   useEffect(() => {
-    const t = setInterval(() => setSeconds(s => s + 1), 1000);
+    if (!liveId) return;
+    const t = setInterval(() => setSeconds(x => x + 1), 1000);
     return () => clearInterval(t);
-  }, []);
+  }, [liveId]);
 
-  // Simulated audience
-  useEffect(() => {
-    const t = setInterval(
-      () => {
-        tick.current += 1;
-        const n = tick.current;
-        const v = pick(VIEWERS, n * 3);
-        if (n % 3 === 1) {
-          say({ name: v.name, photo: v.photo, joined: true });
-          setViewers(x => {
-            const next = x + 1;
-            setPeak(p => Math.max(p, next));
-            return next;
-          });
-          setTotalViewers(x => x + 1);
-        } else if (n % 5 === 0) {
-          const g = pick(GIFTS.slice(0, 6), n);
-          say({ name: v.name, photo: v.photo, gift: g });
-          setDiamonds(d => d + g.coins);
-          setGifters(m => ({
-            ...m,
-            [v.id]: { ...v, coins: (m[v.id]?.coins || 0) + g.coins },
-          }));
-        } else if (n % 7 === 0) {
-          say({ name: v.name, photo: v.photo, followed: true });
-          setFollowers(f => f + 1);
-        } else {
-          say({ name: v.name, photo: v.photo, text: pick(LINES, n * 7) });
-        }
-        if (allowGuests && n % 6 === 2) {
-          setRequests(rs =>
-            rs.some(r => r.id === v.id) ||
-            guestsRef.current.some(g => g.id === v.id)
-              ? rs
-              : [...rs, v],
-          );
-          say({ system: true, text: `${v.name} asked to join you on video.` });
-        }
-        if (n % 9 === 0) setViewers(x => Math.max(0, x - 1));
-      },
-      premium ? 3200 : 2400,
-    );
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allowGuests, premium]);
+  const here = p => p?.liveId === liveRef.current;
+  useSocketEvent('live:viewer_joined', p => {
+    if (!here(p)) return;
+    setViewers(p.viewers);
+    say({ name: p.user?.name, photo: p.user?.photo, joined: true });
+  });
+  useSocketEvent('live:viewer_left', p => here(p) && setViewers(p.viewers));
+  useSocketEvent('live:chat', p => {
+    if (!here(p) || p.message.user?.id === user.id) return;
+    say(fromServer(p.message));
+  });
+  useSocketEvent('live:gift', p => {
+    if (!here(p)) return;
+    setDiamonds(p.diamonds);
+    say({ name: p.from?.name, photo: p.from?.photo, gift: p.gift });
+    const id = p.from?.id;
+    if (id) {
+      setGifters(m => ({
+        ...m,
+        [id]: { ...person(p.from), coins: (m[id]?.coins || 0) + p.gift.coins },
+      }));
+    }
+  });
+  useSocketEvent('live:request', p => {
+    if (!here(p)) return;
+    say({ system: true, text: `${p.user.name} asked to join you on video.` });
+  });
+  useSocketEvent('live:requests', p => {
+    if (!here(p)) return;
+    setRequests(p.requests.map(r => person(r.user)));
+  });
+  useSocketEvent('live:guests', p => {
+    if (!here(p)) return;
+    setGuests(p.guests.map(g => person(g.user, { uid: g.uid, muted: g.muted })));
+  });
+  useSocketEvent('live:ended', p => {
+    // Ended by moderation (or another device): show the summary.
+    if (here(p) && !done.current) finishWith(null);
+  });
+  useSocketEvent('live:warning', p => {
+    if (here(p)) Alert.alert('Warning from REBU', p.message || p.reason);
+  });
 
   // Hardware back asks before ending.
   useFocusEffect(
@@ -210,71 +199,62 @@ export default function MyLiveScreen({ navigation, route }) {
     }, []),
   );
 
+  const act = (path, okText) =>
+    post(`/lives/${liveId}${path}`)
+      .then(() => okText && say({ system: true, text: okText }))
+      .catch(e => say({ system: true, text: e.message }));
+
   const accept = r => {
     if (guests.length >= MAX_GUESTS) return;
     hapticLight();
-    setGuests(g => [...g, r]);
-    setRequests(rs => rs.filter(x => x.id !== r.id));
-    say({ system: true, text: `${r.name} joined you on video 🎥` });
+    act(`/requests/${r.id}/accept`, `${r.name} joined you on video 🎥`);
   };
-  const decline = r => setRequests(rs => rs.filter(x => x.id !== r.id));
-  const removeGuest = g => {
-    setGuests(gs => gs.filter(x => x.id !== g.id));
-    say({ system: true, text: `${g.name} left the stage.` });
-  };
+  const decline = r => act(`/requests/${r.id}/decline`);
+  const removeGuest = g =>
+    act(`/guests/${g.id}/remove`, `${g.name} left the stage.`);
 
-  const send = () => {
-    if (!text.trim()) return;
-    say({
-      name: user.name.split(' ')[0],
-      photo: user.photos[0],
-      text: text.trim(),
-      me: true,
-    });
+  const send = async () => {
+    const t = text.trim();
+    if (!t || !liveId) return;
     setText('');
+    try {
+      await post(`/lives/${liveId}/chat`, { text: t });
+      say({ name: user.name.split(' ')[0], photo: user.photos[0], text: t, me: true });
+    } catch (e) {
+      setText(t);
+      say({ system: true, text: e.message });
+    }
   };
 
-  const end = () => {
-    setSheet(null);
-    // Hosts get paid for what viewers spent; non-hosts just keep the diamonds.
-    const paid = [];
-    if (isHost) {
-      addLiveSession(seconds);
-      Object.values(gifters).forEach(g =>
-        paid.push({
-          source: 'gift',
-          from: g.name,
-          photo: g.photo,
-          coins: g.coins,
-          agency: hostAgency,
-          detail: `Gifts in your live “${title}”`,
-        }),
-      );
-      if (premium && totalViewers) {
-        paid.push({
-          source: 'ticket',
-          from: `${totalViewers} viewers`,
-          coins: ticket * totalViewers,
-          agency: hostAgency,
-          detail: `${totalViewers} × ${ticket} coin tickets`,
-        });
-      }
-      paid.forEach(addEarning);
+  const finishWith = async summary => {
+    done.current = true;
+    let sum = summary;
+    if (!sum) {
+      sum = await get(`/lives/${liveRef.current}/summary`)
+        .then(r => r.summary)
+        .catch(() => null);
     }
+    refreshHostMoney();
     navigation.replace('LiveSummary', {
-      earned: paid.reduce((n, p) => n + split(p).net, 0),
-      title,
-      premium,
-      seconds,
-      totalViewers,
-      peak,
-      diamonds,
-      followers,
-      gifters: Object.values(gifters)
-        .sort((a, b) => b.coins - a.coins)
-        .slice(0, 3),
+      ...(sum || { title, premium, seconds, diamonds }),
       cover,
     });
+  };
+
+  const end = async () => {
+    setSheet(null);
+    if (!liveId) {
+      navigation.goBack();
+      return;
+    }
+    setEnding(true);
+    try {
+      const r = await post(`/lives/${liveId}/end`);
+      finishWith(r.summary);
+    } catch (e) {
+      setEnding(false);
+      Alert.alert('Couldn’t end the live', e.message);
+    }
   };
 
   const topGifters = Object.values(gifters).sort((a, b) => b.coins - a.coins);
@@ -282,7 +262,11 @@ export default function MyLiveScreen({ navigation, route }) {
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" />
-      <LiveCamera position={position} cover={cover} />
+      {rtc.live ? (
+        <RtcSurfaceView canvas={{ uid: 0 }} style={StyleSheet.absoluteFill} />
+      ) : (
+        <Image source={{ uri: cover }} style={StyleSheet.absoluteFill} />
+      )}
       <LinearGradient
         colors={[
           'rgba(0,0,0,0.35)',
@@ -346,6 +330,12 @@ export default function MyLiveScreen({ navigation, route }) {
         {guests.map(g => (
           <View key={g.id} style={styles.guest}>
             <Image source={{ uri: g.photo }} style={StyleSheet.absoluteFill} />
+            {rtc.live && rtc.remoteUids.includes(g.uid) ? (
+              <RtcTextureView
+                canvas={{ uid: g.uid }}
+                style={StyleSheet.absoluteFill}
+              />
+            ) : null}
             <View style={styles.guestName}>
               <Txt style={styles.guestNameText}>{g.name}</Txt>
             </View>
@@ -455,13 +445,17 @@ export default function MyLiveScreen({ navigation, route }) {
                   label: 'Flip',
                   icon: SwitchCamera,
                   onPress: () =>
-                    setPosition(p => (p === 'front' ? 'back' : 'front')),
+                    rtc.switchCamera(),
                 },
                 {
                   key: 'mic',
                   label: muted ? 'Unmute' : 'Mute',
                   icon: muted ? MicOff : Mic,
-                  onPress: () => setMuted(m => !m),
+                  onPress: () =>
+                    setMuted(m => {
+                      rtc.setMuted(!m);
+                      return !m;
+                    }),
                 },
                 {
                   key: 'more',
@@ -505,10 +499,12 @@ export default function MyLiveScreen({ navigation, route }) {
         ) : (
           requests.map(r => (
             <View key={r.id} style={styles.reqRow}>
-              <Image source={{ uri: r.photo }} style={styles.reqAvatar} />
+              <Avatar uri={r.photo} size={44} />
               <View style={styles.flex}>
                 <Txt style={styles.reqName}>{r.name}</Txt>
-                <Txt style={styles.reqSub}>Level {r.level}</Txt>
+                <Txt style={styles.reqSub}>
+                  {r.level ? `VIP ${r.level}` : 'Viewer'}
+                </Txt>
               </View>
               <Pressable style={styles.decline} onPress={() => decline(r)}>
                 <Txt style={styles.declineText}>Decline</Txt>
@@ -545,7 +541,7 @@ export default function MyLiveScreen({ navigation, route }) {
           topGifters.map((g, i) => (
             <View key={g.id} style={styles.reqRow}>
               <Txt style={styles.rank}>{i + 1}</Txt>
-              <Image source={{ uri: g.photo }} style={styles.reqAvatar} />
+              <Avatar uri={g.photo} size={44} />
               <Txt style={[styles.reqName, styles.flex]}>{g.name}</Txt>
               <Gem size={14} color={colors.coin} />
               <Txt style={styles.reqName}>{num(g.coins)}</Txt>
@@ -587,7 +583,7 @@ export default function MyLiveScreen({ navigation, route }) {
         <View style={styles.endStats}>
           {[
             ['Time', clock(seconds)],
-            ['Viewers', totalViewers],
+            ['Viewers', viewers],
             ['Diamonds', num(diamonds)],
           ].map(([k, v]) => (
             <View key={k} style={styles.endStat}>
@@ -596,7 +592,7 @@ export default function MyLiveScreen({ navigation, route }) {
             </View>
           ))}
         </View>
-        <Button title="End live" onPress={end} />
+        <Button title="End live" onPress={end} loading={ending} />
         <Button
           title="Keep going"
           variant="outline"

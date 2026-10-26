@@ -14,13 +14,30 @@ import BuySheet from '../../components/BuySheet';
 import { Card } from '../../components/ListRow';
 import { CoinIcon } from '../../components/CoinPill';
 
+const MONTHS = 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split(' ');
+const dateLabel = d => {
+  const x = new Date(d);
+  return `${x.getDate()} ${MONTHS[x.getMonth()]}`;
+};
+
 /* ---------- VIP / VIP Elite ---------- */
 export function VipScreen({ navigation }) {
-  const { vipLevel, setVipLevel } = useApp();
+  const { vipLevel, store, config, buyVip } = useApp();
+  const tiers = (config?.vipTiers?.length ? config.vipTiers : VIP_TIERS).map(
+    t => ({
+      ...t,
+      color: VIP_TIERS.find(v => v.level === t.level)?.color || [
+        '#F5B301',
+        '#F5B301',
+      ],
+    }),
+  );
   const [selected, setSelected] = useState(Math.max(vipLevel, 1));
   const [buying, setBuying] = useState(null);
-  const tier = VIP_TIERS.find(t => t.level === selected);
-  const owned = vipLevel >= selected;
+  const tier = tiers.find(t => t.level === selected) || tiers[0];
+  // Higher levels are upgrades; the current level can be extended.
+  const lower = vipLevel > selected;
+  const current = vipLevel === selected;
 
   return (
     <Screen
@@ -30,11 +47,13 @@ export function VipScreen({ navigation }) {
         <View style={styles.footer}>
           <Button
             title={
-              owned
-                ? `${tier.name} active`
+              lower
+                ? `You have VIP ${vipLevel}`
+                : current
+                ? `Extend ${tier.name} · ${num(tier.price)} coins`
                 : `Get ${tier.name} · ${num(tier.price)} coins`
             }
-            disabled={owned}
+            disabled={lower}
             gradient={tier.color}
             onPress={() =>
               setBuying({
@@ -51,7 +70,7 @@ export function VipScreen({ navigation }) {
       <Header title="VIP Membership" />
       <View style={styles.body}>
         <View style={styles.tabs}>
-          {VIP_TIERS.map(t => (
+          {tiers.map(t => (
             <Pressable
               key={t.level}
               style={styles.flex}
@@ -90,6 +109,7 @@ export function VipScreen({ navigation }) {
           {vipLevel ? (
             <Txt style={styles.heroNote}>
               Current: {vipLevel >= 4 ? 'VIP Elite' : `VIP ${vipLevel}`}
+              {store.vip?.until ? ` · until ${dateLabel(store.vip.until)}` : ''}
             </Txt>
           ) : null}
         </LinearGradient>
@@ -108,7 +128,7 @@ export function VipScreen({ navigation }) {
       <BuySheet
         item={buying}
         onClose={() => setBuying(null)}
-        onBought={() => setVipLevel(selected)}
+        onBuy={() => buyVip(tier.level)}
         onRecharge={() => {
           setBuying(null);
           navigation.navigate('Wallet');
@@ -120,10 +140,11 @@ export function VipScreen({ navigation }) {
 
 /* ---------- Royal Club ---------- */
 export function AristocracyScreen({ navigation }) {
-  const { nobility, setNobility } = useApp();
-  const [selected, setSelected] = useState(nobility?.key || ARISTOCRACY[0].key);
+  const { nobility, store, config, buyRoyal } = useApp();
+  const ranks = config?.royalClub?.length ? config.royalClub : ARISTOCRACY;
+  const [selected, setSelected] = useState(nobility?.key || ranks[0].key);
   const [buying, setBuying] = useState(null);
-  const rank = ARISTOCRACY.find(a => a.key === selected);
+  const rank = ranks.find(a => a.key === selected) || ranks[0];
   const active = nobility?.key === selected;
 
   return (
@@ -135,10 +156,9 @@ export function AristocracyScreen({ navigation }) {
           <Button
             title={
               active
-                ? `${rank.name} active`
+                ? `Extend ${rank.name} · ${num(rank.price)} coins`
                 : `Become ${rank.name} · ${num(rank.price)} coins`
             }
-            disabled={active}
             gradient={['#C9A86A', '#8A6A2F']}
             onPress={() =>
               setBuying({
@@ -155,7 +175,7 @@ export function AristocracyScreen({ navigation }) {
       <Header title="Royal Club" />
       <View style={styles.body}>
         <View style={styles.ranks}>
-          {ARISTOCRACY.map(a => (
+          {ranks.map(a => (
             <Pressable
               key={a.key}
               onPress={() => setSelected(a.key)}
@@ -178,6 +198,11 @@ export function AristocracyScreen({ navigation }) {
             <CoinIcon size={18} />
             <Txt style={styles.heroPriceText}>{num(rank.price)} / 30 days</Txt>
           </View>
+          {active && store.royal?.until ? (
+            <Txt style={styles.heroNote}>
+              Active until {dateLabel(store.royal.until)}
+            </Txt>
+          ) : null}
         </LinearGradient>
         <Txt variant="h3" style={styles.section}>
           Royal Club privileges
@@ -194,7 +219,7 @@ export function AristocracyScreen({ navigation }) {
       <BuySheet
         item={buying}
         onClose={() => setBuying(null)}
-        onBought={() => setNobility(rank)}
+        onBuy={() => buyRoyal(rank.key)}
         onRecharge={() => {
           setBuying(null);
           navigation.navigate('Wallet');

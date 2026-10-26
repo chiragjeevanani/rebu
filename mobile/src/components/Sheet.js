@@ -1,5 +1,11 @@
 import React from 'react';
-import { Modal, Pressable, StyleSheet, View } from 'react-native';
+import {
+  KeyboardAvoidingView,
+  Modal,
+  Pressable,
+  StyleSheet,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, radius } from '../theme';
 import Txt from './Txt';
@@ -22,35 +28,39 @@ export default function Sheet({
       statusBarTranslucent
       onRequestClose={onClose}
     >
-      <Pressable style={styles.backdrop} onPress={onClose} />
-      <View
-        style={[
-          styles.sheet,
-          dark && styles.dark,
-          { paddingBottom: insets.bottom + 16 },
-        ]}
-      >
+      {/* Inside a Modal the window doesn't resize for the keyboard, so lift the sheet ourselves. */}
+      <KeyboardAvoidingView behavior="padding" style={styles.fill}>
+        <Pressable style={styles.backdrop} onPress={onClose} />
         <View
           style={[
-            styles.grabber,
-            dark && { backgroundColor: 'rgba(255,255,255,0.25)' },
+            styles.sheet,
+            dark && styles.dark,
+            { paddingBottom: insets.bottom + 16 },
           ]}
-        />
-        {title ? (
-          <View style={styles.titleRow}>
-            <Txt variant="h2" color={dark ? colors.white : colors.ink}>
-              {title}
-            </Txt>
-            {right}
-          </View>
-        ) : null}
-        {children}
-      </View>
+        >
+          <View
+            style={[
+              styles.grabber,
+              dark && { backgroundColor: 'rgba(255,255,255,0.25)' },
+            ]}
+          />
+          {title ? (
+            <View style={styles.titleRow}>
+              <Txt variant="h2" color={dark ? colors.white : colors.ink}>
+                {title}
+              </Txt>
+              {right}
+            </View>
+          ) : null}
+          {children}
+        </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
+  fill: { flex: 1 },
   backdrop: { flex: 1, backgroundColor: colors.overlay },
   sheet: {
     backgroundColor: colors.surface,

@@ -35,3 +35,15 @@ export const CALL_STATUS = {
 };
 
 export const callStatus = key => CALL_STATUS[key] || CALL_STATUS.completed;
+
+// Server reasons → the outcome keys the call-ended screen knows.
+export const OUTCOME = {
+  hangup: 'completed',
+  no_coins: 'balance',
+  timeout: 'no_answer',
+  declined: 'declined',
+  cancelled: 'cancelled',
+  disconnect: 'dropped',
+  server_restart: 'dropped',
+  error: 'failed',
+};

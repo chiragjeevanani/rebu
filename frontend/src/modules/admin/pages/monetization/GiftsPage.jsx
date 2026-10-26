@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Gift, Info, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { errorText } from '../../api/client'
 import { Badge, Button, Card, Confirm, Empty, Field, Input, Modal, PageHeader, Seg, Select, Setting, Switch } from '../../components/ui'
 import { BarList } from '../../components/charts'
 import { compact, inr, num } from '../../utils/format'
@@ -139,6 +140,10 @@ const diff = (a, b) => {
   return out
 }
 
+// Client-only fields never go to the API (the gifts schema is key-based).
+const GIFT_FIELDS = ['key', 'name', 'emoji', 'image', 'coins', 'fullScreen', 'category', 'active', 'order']
+const toApi = list => list.map(g => Object.fromEntries(GIFT_FIELDS.filter(k => g[k] !== undefined).map(k => [k, g[k]])))
+
 export default function GiftsPage() {
   const { db, setConfig } = useStore()
   const toast = useToast()
@@ -146,9 +151,23 @@ export default function GiftsPage() {
   const [sort, setSort] = useState('order')
   const [editing, setEditing] = useState(null) // gift | 'new'
   const [deleting, setDeleting] = useState(null)
-  const gifts = db.config.gifts
+  // Server gifts are keyed by `key`; the page uses `id`.
+  // TODO(api): sends per gift (sent30d) — want GET /admin/finance/gifts?days=30 →
+  // { items: [{ key, sent, coins, gross }] }. Until then the 30-day stats read 0.
+  const gifts = useMemo(() => db.config.gifts.map(g => ({ ...g, id: g.key })), [db.config.gifts])
   const coinInr = db.config.economy.coinInr
   const giftCut = db.config.economy.commission.gift
+
+  const persist = async (list, msg) => {
+    try {
+      await setConfig('gifts', toApi(list))
+      if (msg) toast(msg)
+      return true
+    } catch (e) {
+      toast(errorText(e), 'error')
+      return false
+    }
+  }
 
   const rows = useMemo(() => {
     const list = gifts.filter(g => cat === 'all' || g.category === cat)
@@ -172,44 +191,23 @@ export default function GiftsPage() {
 
   const counts = Object.fromEntries(CATEGORIES.map(c => [c, gifts.filter(g => g.category === c).length]))
 
-  const toggle = g => {
-    setConfig('gifts', list => list.map(x => (x.id === g.id ? { ...x, active: !x.active } : x)), [
-      `${g.active ? 'Deactivated' : 'Activated'} gift ${g.name} (${num(g.coins)} coins)`,
-      'Gifts',
-    ])
-  }
+  const toggle = g => persist(gifts.map(x => (x.id === g.id ? { ...x, active: !x.active } : x)))
 
-  const save = data => {
+  const save = async data => {
+    let ok = true
     if (editing === 'new') {
-      const gift = {
-        id: data.key,
-        ...data,
-        order: Math.max(0, ...gifts.map(g => g.order || 0)) + 1,
-        sent30d: 0,
-      }
-      setConfig('gifts', list => [...list, gift], [
-        `Added gift ${gift.emoji} ${gift.name} (${gift.key}) at ${num(gift.coins)} coins${gift.fullScreen ? ', full-screen' : ''}`,
-        'Gifts',
-      ])
-      toast(`${gift.name} added`)
-    } else {
-      const changes = diff(editing, data)
-      if (changes.length) {
-        setConfig('gifts', list => list.map(x => (x.id === editing.id ? { ...x, ...data } : x)), [
-          `Edited gift ${editing.name}: ${changes.join(', ')}`,
-          'Gifts',
-        ])
-        toast(`${data.name} saved`)
-      }
+      const gift = { ...data, order: Math.max(0, ...gifts.map(g => g.order || 0)) + 1 }
+      ok = await persist([...gifts, gift], `${gift.name} added`)
+    } else if (diff(editing, data).length) {
+      ok = await persist(gifts.map(x => (x.id === editing.id ? { ...x, ...data } : x)), `${data.name} saved`)
     }
-    setEditing(null)
+    if (ok) setEditing(null)
   }
 
-  const remove = () => {
+  const remove = async () => {
     const g = deleting
-    setConfig('gifts', list => list.filter(x => x.id !== g.id), [`Deleted gift ${g.name} (${g.key}, ${num(g.coins)} coins)`, 'Gifts'])
-    toast(`${g.name} deleted`)
     setDeleting(null)
+    await persist(gifts.filter(x => x.id !== g.id), `${g.name} deleted`)
   }
 
   return (

@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { BellRing, CalendarClock, Copy, Send, Users, XCircle } from 'lucide-react'
-import { useStore } from '../../hooks/useStore'
+import { serverTable, useApi, usePaging } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
 import { useToast } from '../../hooks/useToast'
 import { Badge, Button, Card, Confirm, DataTable, Empty, Field, Input, PageHeader, SearchInput, Seg, Select, Status, Textarea } from '../../components/ui'
 import { dateTime, num, pct } from '../../utils/format'
@@ -22,32 +23,14 @@ const AUDIENCES = [
   { value: 'Followers of live hosts', hint: 'Followers of hosts who are live right now' },
 ]
 
-/** Estimated reach for an audience, from the demo data. */
-function reachOf(audience, db, now) {
-  const users = db.users.filter(u => u.status === 'active')
-  const hosts = db.hosts.filter(h => h.status === 'active')
-  switch (audience) {
-    case 'All users':
-      return users.length
-    case 'Paying users':
-      return users.filter(u => u.spent > 0).length
-    case 'VIP members':
-      return users.filter(u => u.vip > 0).length
-    case 'Inactive 14+ days':
-      return users.filter(u => now - u.lastActive > 14 * DAY).length
-    case 'New users (7 days)':
-      return users.filter(u => now - u.joined < 7 * DAY).length
-    case 'All hosts':
-      return hosts.length
-    case 'Hosts offline today':
-      return hosts.filter(h => !h.online).length
-    case 'Followers of live hosts': {
-      const live = new Set(db.lives.filter(l => l.status === 'live').map(l => l.hostId))
-      return db.hosts.filter(h => live.has(h.id)).reduce((n, h) => n + h.followers, 0)
-    }
-    default:
-      return 0
-  }
+/** Value that settles `delay` ms after the last change (search boxes). */
+function useDebounced(value, delay = 300) {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), delay)
+    return () => clearTimeout(t)
+  }, [value, delay])
+  return v
 }
 
 const toLocalInput = ts => {
@@ -125,16 +108,23 @@ function PhonePreview({ title, body, when }) {
 }
 
 export default function NotificationsPage() {
-  const { db, update, create, log } = useStore()
   const toast = useToast()
   const [now] = useState(clock)
   const [f, setF] = useState(() => blank(now))
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('all')
   const [cancelling, setCancelling] = useState(null)
+  const [busy, setBusy] = useState(false)
   const set = patch => setF(x => ({ ...x, ...patch }))
 
-  const reach = useMemo(() => reachOf(f.audience, db, now), [f.audience, db, now])
+  const reachRes = useApi('/admin/content/notifications/reach', { audience: f.audience })
+  const reach = reachRes.data?.audience === f.audience ? reachRes.data.reach : null
+  const reachText = reach == null ? '…' : num(reach)
+
+  const term = useDebounced(q.trim())
+  const pg = usePaging({ q: term, status: status === 'all' ? '' : status })
+  const res = useApi('/admin/content/notifications', pg.query)
+  const rows = res.data?.items || []
   const atTs = f.at ? new Date(f.at).getTime() : NaN
 
   const errors = {
@@ -143,27 +133,30 @@ export default function NotificationsPage() {
   }
   const valid = f.title.trim() && f.body.trim() && !errors.deeplink && !errors.at
 
-  const send = () => {
+  const send = async () => {
     const sendNow = f.mode === 'now'
     const when = sendNow ? clock() : atTs
     if (!sendNow && when <= clock()) {
       toast('The scheduled time has already passed', 'error')
       return
     }
-    const n = create('notifications', {
-      title: f.title.trim(),
-      body: f.body.trim(),
-      audience: f.audience,
-      deeplink: f.deeplink.trim(),
-      scheduledAt: sendNow ? null : when,
-      sentAt: sendNow ? when : null,
-      status: sendNow ? 'sent' : 'scheduled',
-      delivered: sendNow ? Math.round(reach * 0.96) : 0,
-      opened: 0,
-    })
-    log(`${sendNow ? 'Sent' : 'Scheduled'} push “${n.title}” to ${f.audience}`, n.id)
-    toast(sendNow ? `Sent to ~${num(reach)} ${f.audience.toLowerCase()}` : `Scheduled for ${dateTime(when)}`)
-    setF(blank(clock()))
+    setBusy(true)
+    try {
+      const { notification: n } = await api.post('/admin/content/notifications', {
+        title: f.title.trim(),
+        body: f.body.trim(),
+        audience: f.audience,
+        deeplink: f.deeplink.trim(),
+        ...(sendNow ? { sendNow: true } : { scheduledAt: new Date(when).toISOString() }),
+      })
+      toast(sendNow ? `Sent to ~${num(n.audienceCount ?? reach)} ${f.audience.toLowerCase()}` : `Scheduled for ${dateTime(when)}`)
+      setF(blank(clock()))
+      res.reload()
+    } catch (e) {
+      toast(errorText(e), 'error')
+    } finally {
+      setBusy(false)
+    }
   }
 
   const duplicate = n => {
@@ -180,12 +173,6 @@ export default function NotificationsPage() {
   }
 
   const whenOf = n => n.sentAt || n.scheduledAt || 0
-  const rows = useMemo(() => {
-    const t = q.trim().toLowerCase()
-    return db.notifications
-      .filter(n => (status === 'all' || n.status === status) && (!t || `${n.title} ${n.body} ${n.audience}`.toLowerCase().includes(t)))
-      .sort((a, b) => whenOf(b) - whenOf(a))
-  }, [db.notifications, q, status])
 
   const previewWhen = (() => {
     const d = new Date(f.mode === 'schedule' && atTs > 0 ? atTs : now)
@@ -216,6 +203,7 @@ export default function NotificationsPage() {
       sort: whenOf,
       render: n => (whenOf(n) ? <span className="a-nowrap">{dateTime(whenOf(n))}</span> : <span className="a-faint">—</span>),
     },
+    // TODO(api): delivered/opened stay 0 until the backend sends via FCM and records receipts.
     { key: 'delivered', label: 'Delivered', align: 'right', sort: n => n.delivered, render: n => (n.delivered ? num(n.delivered) : '—') },
     { key: 'opened', label: 'Opened', align: 'right', sort: n => n.opened, render: n => (n.status === 'sent' ? num(n.opened) : '—') },
     {
@@ -271,7 +259,7 @@ export default function NotificationsPage() {
             >
               <Users size={17} className="a-muted" />
               <span>
-                Estimated reach <b className="a-strong">~{num(reach)}</b> {f.audience.includes('host') && f.audience !== 'Followers of live hosts' ? 'hosts' : 'people'}
+                Estimated reach <b className="a-strong">~{reachText}</b> {f.audience.includes('host') && f.audience !== 'Followers of live hosts' ? 'hosts' : 'people'}
               </span>
             </div>
             <div className="a-row wrap">
@@ -296,8 +284,8 @@ export default function NotificationsPage() {
               Clear
             </Button>
             <span className="a-spacer" />
-            <Button variant="primary" icon={f.mode === 'now' ? Send : CalendarClock} disabled={!valid} onClick={send}>
-              {f.mode === 'now' ? `Send to ~${num(reach)}` : 'Schedule'}
+            <Button variant="primary" icon={f.mode === 'now' ? Send : CalendarClock} disabled={!valid || busy} onClick={send}>
+              {f.mode === 'now' ? `Send to ~${reachText}` : 'Schedule'}
             </Button>
           </div>
         </Card>
@@ -311,6 +299,7 @@ export default function NotificationsPage() {
         <DataTable
           rows={rows}
           columns={columns}
+          {...serverTable(pg, res)}
           toolbar={
             <>
               <SearchInput value={q} onChange={setQ} placeholder="Search title, message, audience" />
@@ -338,10 +327,15 @@ export default function NotificationsPage() {
         confirmLabel="Cancel notification"
         danger
         onClose={() => setCancelling(null)}
-        onConfirm={() => {
-          update('notifications', cancelling.id, { status: 'cancelled' }, [`Cancelled scheduled push “${cancelling.title}”`, cancelling.id])
-          toast('Scheduled notification cancelled')
-          setCancelling(null)
+        onConfirm={async () => {
+          try {
+            await api.post(`/admin/content/notifications/${cancelling.id}/cancel`)
+            toast('Scheduled notification cancelled')
+            setCancelling(null)
+            res.reload()
+          } catch (e) {
+            toast(errorText(e), 'error')
+          }
         }}
       />
     </>

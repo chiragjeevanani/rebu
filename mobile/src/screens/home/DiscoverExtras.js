@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { FlatList, Image, Pressable, StyleSheet } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { Search } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
-import { HOSTS } from '../../data/mock';
-import { LEADERBOARD } from '../../data/social';
+import { get } from '../../api/client';
+import { toAppHost } from '../../api/hosts';
 import { useApp } from '../../context/AppContext';
 import { num } from '../../utils/format';
 import Screen from '../../components/Screen';
@@ -16,17 +16,22 @@ import { HiButton, HostRow } from '../../components/Social';
 
 /* ---------- Search hosts ---------- */
 export function SearchScreen({ navigation }) {
-  const { greeted, greet } = useApp();
+  const { greeted } = useApp();
   const [q, setQ] = useState('');
-  const term = q.trim().toLowerCase();
-  const results = term
-    ? HOSTS.filter(
-        h =>
-          h.name.toLowerCase().includes(term) ||
-          h.city.toLowerCase().includes(term) ||
-          h.id === term,
-      )
-    : [];
+  const [results, setResults] = useState([]);
+  const term = q.trim();
+  // Server search (name / city / id), a beat after typing stops.
+  useEffect(() => {
+    if (!term) return setResults([]);
+    const t = setTimeout(
+      () =>
+        get(`/hosts?q=${encodeURIComponent(term)}&limit=30`)
+          .then(r => setResults(r.items.map(toAppHost)))
+          .catch(() => setResults([])),
+      300,
+    );
+    return () => clearTimeout(t);
+  }, [term]);
 
   return (
     <Screen>
@@ -63,16 +68,14 @@ export function SearchScreen({ navigation }) {
               <HiButton
                 greeted={greeted.includes(item.id)}
                 onPress={() => {
-                  const first = !greeted.includes(item.id);
-                  greet(item.id);
                   navigation.navigate('ChatRoom', {
+                    greet: !greeted.includes(item.id),
                     chat: {
                       userId: item.id,
                       name: item.name,
                       photo: item.photo,
                       online: item.online,
                     },
-                    greeting: first,
                   });
                 }}
               />
@@ -89,7 +92,24 @@ const MEDALS = ['🥇', '🥈', '🥉'];
 
 export function LeaderboardScreen({ navigation }) {
   const [board, setBoard] = useState('hosts');
-  const rows = LEADERBOARD[board];
+  const [data, setData] = useState({});
+  useEffect(() => {
+    get(`/social/leaderboard?type=${board}&period=week`)
+      .then(r =>
+        setData(d => ({
+          ...d,
+          [board]: r.items.map(i => ({
+            rank: i.rank,
+            name: i.user.name,
+            photo: i.user.photo,
+            score: i.score,
+            host: i.user.isHost ? toAppHost(i.user) : null,
+          })),
+        })),
+      )
+      .catch(() => setData(d => ({ ...d, [board]: [] })));
+  }, [board]);
+  const rows = data[board] || [];
   const top = rows.slice(0, 3);
   const rest = rows.slice(3);
 
@@ -109,6 +129,18 @@ export function LeaderboardScreen({ navigation }) {
         data={rest}
         keyExtractor={r => `${board}${r.rank}`}
         contentContainerStyle={styles.list}
+        ListEmptyComponent={
+          data[board] && !rows.length ? (
+            <Txt
+              variant="body"
+              color={colors.textMuted}
+              center
+              style={styles.empty}
+            >
+              No one on the board yet this week.
+            </Txt>
+          ) : null
+        }
         ListHeaderComponent={
           <LinearGradient
             colors={['#1C1C1E', '#1C1C1E']}

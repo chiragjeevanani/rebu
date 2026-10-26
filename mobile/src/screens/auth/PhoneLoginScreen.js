@@ -9,6 +9,7 @@ import {
 import { ChevronDown, FlaskConical, ShieldCheck } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
 import { DEMO_ACCOUNT } from '../../data/mock';
+import { post } from '../../api/client';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
 import Txt from '../../components/Txt';
@@ -17,6 +18,26 @@ import Button from '../../components/Button';
 
 export default function PhoneLoginScreen({ navigation }) {
   const [phone, setPhone] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+
+  const send = async () => {
+    const digits = phone.replace(/[^0-9]/g, '');
+    setSending(true);
+    setError('');
+    try {
+      const r = await post('/auth/otp/send', { phone: digits });
+      navigation.navigate('Otp', {
+        phone: digits,
+        devCode: r.devCode,
+        resendAfter: r.resendAfter,
+      });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSending(false);
+    }
+  };
   const valid = phone.replace(/\D/g, '').length === 10;
 
   return (
@@ -74,11 +95,17 @@ export default function PhoneLoginScreen({ navigation }) {
           </Txt>
         </Pressable>
 
+        {error ? (
+          <Txt variant="small" color={colors.danger} style={styles.sub}>
+            {error}
+          </Txt>
+        ) : null}
         <View style={{ flex: 1 }} />
         <Button
           title="Send OTP"
           disabled={!valid}
-          onPress={() => navigation.navigate('Otp', { phone })}
+          loading={sending}
+          onPress={send}
         />
         <Button
           title="Continue with email"

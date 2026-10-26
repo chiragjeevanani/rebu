@@ -34,6 +34,11 @@ const round2 = n => Math.round(n * 100) / 100;
 
 /** Gross → commission → agency → net (₹) for one earning record. */
 export function split(rec) {
+  // Server ledger rows already carry the settled amounts.
+  if (typeof rec.net === 'number') {
+    const { gross, commission, agencyAmount: agency, net } = rec;
+    return { gross, commission, agency, net };
+  }
   const gross = round2(rec.coins * ECONOMY.coinInr);
   const commission = round2(
     (gross * (ECONOMY.commission[rec.source] || 0)) / 100,

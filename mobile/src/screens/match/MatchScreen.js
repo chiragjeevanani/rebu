@@ -3,7 +3,7 @@ import { ScrollView, StyleSheet, View } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { Phone, ShieldCheck, Shuffle, Video } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
-import { HOSTS } from '../../data/mock';
+import { useHosts } from '../../api/hosts';
 import { useApp } from '../../context/AppContext';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
@@ -20,7 +20,7 @@ export const RANDOM_RATES = { video: 40, voice: 20 };
 export default function MatchScreen({ navigation }) {
   const { coins } = useApp();
   const [language, setLanguage] = useState('Any');
-  const online = HOSTS.filter(h => h.online);
+  const online = useHosts().filter(h => h.online);
   const start = video => navigation.navigate('RandomCall', { video, language });
 
   return (
@@ -63,7 +63,9 @@ export default function MatchScreen({ navigation }) {
                 style={[styles.face, i > 0 && styles.faceOverlap]}
               />
             ))}
-            <Txt style={styles.facesText}>+{online.length * 214} online</Txt>
+            <Txt style={styles.facesText}>
+              {online.length} host{online.length === 1 ? '' : 's'} online
+            </Txt>
           </View>
         </LinearGradient>
 

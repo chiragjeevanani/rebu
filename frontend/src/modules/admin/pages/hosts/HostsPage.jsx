@@ -1,8 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { BadgeCheck, Download, RotateCcw, ShieldOff, Star } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { serverTable, useApi, usePaging } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
+import { canAccess } from '../../routes/nav'
 import { Badge, Button, Card, Confirm, DataTable, PageHeader, SearchInput, Seg, Select, Status, Who } from '../../components/ui'
 import { exportCsv, inr, num } from '../../utils/format'
 
@@ -15,8 +18,19 @@ const STATUS = [
 
 const LEVEL_TONES = ['neutral', 'info', 'violet', 'warning']
 
+function useDebounced(value, delay = 300) {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), delay)
+    return () => clearTimeout(t)
+  }, [value, delay])
+  return v
+}
+
+const total = res => res.data?.total ?? 0
+
 export default function HostsPage() {
-  const { db, update, log } = useStore()
+  const { db, me } = useStore()
   const toast = useToast()
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
@@ -27,57 +41,73 @@ export default function HostsPage() {
   const [agency, setAgency] = useState('any')
   const [confirm, setConfirm] = useState(null) // { ids, clear }
 
-  const agencyById = useMemo(() => Object.fromEntries(db.agencies.map(a => [a.id, a])), [db.agencies])
+  const term = useDebounced(q.trim())
 
-  const rows = useMemo(() => {
-    const t = q.trim().toLowerCase()
-    return db.hosts.filter(
-      h =>
-        (status === 'all' || h.status === status) &&
-        (level === 'any' || h.level === Number(level)) &&
-        (online === 'any' || (online === 'online' ? h.online : !h.online)) &&
-        (agency === 'any' || (agency === 'independent' ? !h.agencyId : h.agencyId === agency)) &&
-        (!t || [h.name, h.id, h.phone, h.city].some(v => String(v).toLowerCase().includes(t))),
-    )
-  }, [db.hosts, q, status, level, online, agency])
+  const agenciesRes = useApi(canAccess(me.role, 'agencies') ? '/admin/agencies' : null, { limit: 100 })
+  const agencies = useMemo(() => agenciesRes.data?.items || [], [agenciesRes.data])
+  const agencyById = useMemo(() => Object.fromEntries(agencies.map(a => [a.id, a])), [agencies])
 
-  const counts = useMemo(
-    () => ({
-      total: db.hosts.length,
-      online: db.hosts.filter(h => h.online && h.status === 'active').length,
-      suspended: db.hosts.filter(h => h.status === 'suspended').length,
-      banned: db.hosts.filter(h => h.status === 'banned').length,
-    }),
-    [db.hosts],
-  )
+  const filters = {
+    q: term || undefined,
+    status: status === 'all' ? undefined : status,
+    level: level === 'any' ? undefined : level,
+    online: online === 'any' ? undefined : online,
+    agency: agency === 'any' ? undefined : agency === 'independent' ? 'none' : agency,
+  }
+  const pg = usePaging(filters, 20)
+  const res = useApi('/admin/hosts', pg.query)
+  const rows = res.data?.items
 
-  const apply = (next, ids, reason) => {
-    ids.forEach(id =>
-      update('hosts', id, next === 'active' ? { status: 'active', statusReason: '' } : { status: next, statusReason: reason || '', online: false }),
-    )
-    log(`${next === 'active' ? 'Reactivated' : 'Suspended'} ${ids.length} host(s)${reason ? ` — ${reason}` : ''}`, ids.join(', '))
-    toast(`${ids.length} host${ids.length > 1 ? 's' : ''} ${next === 'active' ? 'reactivated' : 'suspended'}`)
+  const all = useApi('/admin/hosts', { limit: 1 })
+  const onlineN = useApi('/admin/hosts', { limit: 1, online: 'true', status: 'active' })
+  const suspN = useApi('/admin/hosts', { limit: 1, status: 'suspended' })
+  const banN = useApi('/admin/hosts', { limit: 1, status: 'banned' })
+  const counts = { total: total(all), online: total(onlineN), suspended: total(suspN), banned: total(banN) }
+
+  const apply = async (next, ids, reason) => {
+    try {
+      const r = await api.post('/admin/hosts/bulk-status', { ids, status: next, reason: reason || undefined })
+      toast(`${r.updated} host${r.updated === 1 ? '' : 's'} ${next === 'active' ? 'reactivated' : 'suspended'}`)
+    } catch (e) {
+      toast(errorText(e), 'error')
+    }
+    ;[res, onlineN, suspN, banN].forEach(r => r.reload())
   }
 
-  const agencyName = h => (h.agencyId ? agencyById[h.agencyId]?.name || 'Unknown agency' : 'Independent')
+  const exportAll = async () => {
+    try {
+      const out = []
+      for (let page = 1; page <= 50; page += 1) {
+        const r = await api.get('/admin/hosts', { ...filters, page, limit: 100 })
+        out.push(...r.items)
+        if (page >= r.pages) break
+      }
+      return out
+    } catch (e) {
+      toast(errorText(e), 'error')
+      return null
+    }
+  }
+
+  const agencyName = h => (h.agencyId ? agencyById[h.agencyId]?.name || 'Agency' : 'Independent')
 
   const columns = [
     {
       key: 'name',
       label: 'Host',
-      sort: h => h.name,
-      render: h => <Who src={h.avatar} name={h.name} sub={`${h.id} · ${h.city}`} to={`/admin/hosts/${h.id}`} />,
+      serverSort: 'name',
+      render: h => <Who src={h.avatar} name={h.name} sub={[h.id, h.city].filter(Boolean).join(' · ')} to={`/admin/hosts/${h.id}`} />,
     },
-    { key: 'level', label: 'Level', sort: h => h.level, render: h => <Badge tone={LEVEL_TONES[h.level - 1]}>Lv {h.level}</Badge> },
-    { key: 'video', label: 'Video', align: 'right', sort: h => h.rates.video, render: h => <span className="a-nowrap">{h.rates.video}/min</span> },
-    { key: 'voice', label: 'Voice', align: 'right', sort: h => h.rates.voice, render: h => <span className="a-nowrap">{h.rates.voice}/min</span> },
-    { key: 'callMinutes', label: 'Call min', align: 'right', sort: h => h.callMinutes, render: h => num(h.callMinutes) },
-    { key: 'lifetime', label: 'Earned', align: 'right', sort: h => h.lifetime, render: h => <b className="a-strong">{inr(h.lifetime)}</b> },
-    { key: 'available', label: 'Balance', align: 'right', sort: h => h.available, render: h => inr(h.available) },
+    { key: 'level', label: 'Level', serverSort: 'level', render: h => <Badge tone={LEVEL_TONES[h.level - 1]}>Lv {h.level}</Badge> },
+    { key: 'video', label: 'Video', align: 'right', render: h => <span className="a-nowrap">{h.rates.video}/min</span> },
+    { key: 'voice', label: 'Voice', align: 'right', render: h => <span className="a-nowrap">{h.rates.voice}/min</span> },
+    { key: 'callMinutes', label: 'Call min', align: 'right', serverSort: 'minutes', render: h => num(h.callMinutes) },
+    { key: 'lifetime', label: 'Earned', align: 'right', render: h => <b className="a-strong">{inr(h.lifetime)}</b> },
+    { key: 'available', label: 'Balance', align: 'right', render: h => inr(h.available) },
     {
       key: 'rating',
       label: 'Rating',
-      sort: h => h.rating,
+      serverSort: 'rating',
       render: h => (
         <span className="a-row a-nowrap" style={{ gap: 4 }}>
           <Star size={14} color="var(--coin)" fill="var(--coin)" />
@@ -85,11 +115,10 @@ export default function HostsPage() {
         </span>
       ),
     },
-    { key: 'agency', label: 'Agency', sort: agencyName, render: h => <span className={h.agencyId ? '' : 'a-muted'}>{agencyName(h)}</span> },
+    { key: 'agency', label: 'Agency', render: h => <span className={h.agencyId ? '' : 'a-muted'}>{agencyName(h)}</span> },
     {
       key: 'status',
       label: 'Status',
-      sort: h => `${h.status}${h.online ? 0 : 1}`,
       render: h => (
         <span className="a-row a-nowrap" style={{ gap: 6 }}>
           {h.status === 'active' ? <Status value={h.online ? 'online' : 'offline'} /> : <Status value={h.status} />}
@@ -107,8 +136,9 @@ export default function HostsPage() {
         actions={
           <Button
             icon={Download}
-            onClick={() =>
-              exportCsv('rebu-hosts.csv', rows, [
+            onClick={async () => {
+              const list = await exportAll()
+              if (list) exportCsv('rebu-hosts.csv', list, [
                 { label: 'ID', value: h => h.id },
                 { label: 'Name', value: h => h.name },
                 { label: 'Phone', value: h => h.phone },
@@ -124,7 +154,7 @@ export default function HostsPage() {
                 { label: 'Online', value: h => (h.online ? 'yes' : 'no') },
                 { label: 'Status', value: h => h.status },
               ])
-            }
+            }}
           >
             Export CSV
           </Button>
@@ -134,8 +164,8 @@ export default function HostsPage() {
         <DataTable
           rows={rows}
           columns={columns}
+          {...serverTable(pg, res)}
           onRowClick={h => navigate(`/admin/hosts/${h.id}`)}
-          initialSort={{ key: 'lifetime', dir: 'desc' }}
           selectable
           bulk={(ids, clear) => (
             <>
@@ -155,7 +185,7 @@ export default function HostsPage() {
                   setQ(v)
                   setParams(v ? { q: v } : {}, { replace: true })
                 }}
-                placeholder="Name, ID, phone, city"
+                placeholder="Name, ID, phone"
               />
               <Seg options={STATUS} value={status} onChange={setStatus} />
               <Select
@@ -178,7 +208,7 @@ export default function HostsPage() {
                 options={[
                   { value: 'any', label: 'All agencies' },
                   { value: 'independent', label: 'Independent' },
-                  ...db.agencies.map(a => ({ value: a.id, label: a.name })),
+                  ...agencies.map(a => ({ value: a.id, label: a.name })),
                 ]}
               />
             </>

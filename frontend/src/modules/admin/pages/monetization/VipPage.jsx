@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ArrowDown, ArrowUp, Check, Crown, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { api, errorText } from '../../api/client'
 import { Badge, Button, Card, Field, Input, Modal, PageHeader, Switch, Tabs } from '../../components/ui'
 import { BarList } from '../../components/charts'
 import { inr, num } from '../../utils/format'
@@ -21,6 +22,7 @@ function TierModal({ kind, tier, list, onClose, onSave }) {
     emoji: tier.emoji || '',
     price: String(tier.price),
     days: String(tier.days ?? ''),
+    coinsBack: String(tier.coinsBack ?? ''),
     perks: [...tier.perks],
     active: tier.active,
   })
@@ -30,6 +32,7 @@ function TierModal({ kind, tier, list, onClose, onSave }) {
 
   const price = Number(f.price)
   const days = Number(f.days)
+  const coinsBack = f.coinsBack.trim() === '' ? 0 : Number(f.coinsBack)
   const err = {}
   if (!f.name.trim()) err.name = 'Required'
   else if (list.some(t => t !== tier && t.name.toLowerCase() === f.name.trim().toLowerCase())) err.name = 'Another tier has this name'
@@ -37,6 +40,7 @@ function TierModal({ kind, tier, list, onClose, onSave }) {
   if (!f.price.trim() || !Number.isInteger(price) || price <= 0) err.price = 'Whole rupees, more than 0'
   else if (prev && price <= prev.price) err.price = `Must be more than ${prev.name} (${inr(prev.price)})`
   else if (next && price >= next.price) err.price = `Must be less than ${next.name} (${inr(next.price)})`
+  if (kind === 'royal' && (!Number.isInteger(coinsBack) || coinsBack < 0)) err.coinsBack = 'Whole coins, 0 or more'
   if (kind === 'vip' && (!Number.isInteger(days) || days <= 0 || days > 366)) err.days = '1–366 days'
   const perks = f.perks.map(p => p.trim())
   if (!perks.length) err.perks = 'Add at least one perk'
@@ -74,7 +78,7 @@ function TierModal({ kind, tier, list, onClose, onSave }) {
                 price,
                 perks,
                 active: f.active,
-                ...(kind === 'vip' ? { days } : { emoji: f.emoji.trim() }),
+                ...(kind === 'vip' ? { days } : { emoji: f.emoji.trim(), coinsBack }),
               })
             }
           >
@@ -96,6 +100,11 @@ function TierModal({ kind, tier, list, onClose, onSave }) {
           <Field label="Price" error={err.price} style={{ flex: 1 }}>
             <Input type="number" min="1" affix="₹" value={f.price} onChange={e => set('price', e.target.value)} />
           </Field>
+          {kind === 'royal' ? (
+            <Field label="Coins back" error={err.coinsBack} hint="Credited on purchase" style={{ width: 150 }}>
+              <Input type="number" min="0" affix="coins" value={f.coinsBack} onChange={e => set('coinsBack', e.target.value)} />
+            </Field>
+          ) : null}
           {kind === 'vip' ? (
             <Field label="Duration" error={err.days} style={{ width: 140 }}>
               <Input type="number" min="1" affix="days" value={f.days} onChange={e => set('days', e.target.value)} />
@@ -158,6 +167,7 @@ function diff(a, b) {
   if (a.name !== b.name) out.push(`name “${a.name}” → “${b.name}”`)
   if (b.emoji !== undefined && a.emoji !== b.emoji) out.push(`emoji ${a.emoji} → ${b.emoji}`)
   if (a.price !== b.price) out.push(`price ${inr(a.price)} → ${inr(b.price)}`)
+  if (b.coinsBack !== undefined && (a.coinsBack || 0) !== b.coinsBack) out.push(`coins back ${a.coinsBack || 0} → ${b.coinsBack}`)
   if (b.days !== undefined && a.days !== b.days) out.push(`duration ${a.days} → ${b.days} days`)
   const added = b.perks.filter(p => !a.perks.includes(p))
   const removed = a.perks.filter(p => !b.perks.includes(p))
@@ -168,6 +178,25 @@ function diff(a, b) {
   return out
 }
 
+/** Users per VIP level from the users list totals: { all, byLevel: { [level]: n } } or null while loading. */
+function useVipCounts(levels) {
+  const key = levels.join(',')
+  const [state, setState] = useState({ key: null, value: null })
+  useEffect(() => {
+    let live = true
+    const ls = key ? key.split(',').map(Number) : []
+    const count = query => api.get('/admin/users', { ...query, limit: 1 }).then(r => r.total)
+    Promise.all([count({}), ...ls.map(l => count({ vip: l }))]).then(
+      ([all, ...per]) => live && setState({ key, value: { all, byLevel: Object.fromEntries(ls.map((l, i) => [l, per[i]])) } }),
+      () => live && setState({ key, value: null }),
+    )
+    return () => {
+      live = false
+    }
+  }, [key])
+  return state.key === key ? state.value : null
+}
+
 export default function VipPage() {
   const { db, setConfig } = useStore()
   const toast = useToast()
@@ -176,35 +205,37 @@ export default function VipPage() {
   const k = KINDS[tab]
   const list = db.config[k.config]
 
+  const vipLevels = useMemo(() => db.config.vipTiers.map(t => t.level), [db.config.vipTiers])
+  const vc = useVipCounts(vipLevels)
   const members = useMemo(() => {
-    const counts = {}
-    for (const u of db.users) counts[u.vip || 0] = (counts[u.vip || 0] || 0) + 1
-    return [
-      { label: 'No VIP', value: counts[0] || 0 },
-      ...db.config.vipTiers.map(t => ({ label: t.name, value: counts[t.level] || 0 })),
-    ]
-  }, [db.users, db.config.vipTiers])
+    const per = db.config.vipTiers.map(t => ({ label: t.name, value: vc?.byLevel[t.level] || 0 }))
+    const vip = per.reduce((n, m) => n + m.value, 0)
+    return [{ label: 'No VIP', value: Math.max(0, (vc?.all || 0) - vip) }, ...per]
+  }, [vc, db.config.vipTiers])
   const vipCount = members.slice(1).reduce((n, m) => n + m.value, 0)
 
-  const toggle = t => {
-    setConfig(k.config, l => l.map(x => (k.id(x) === k.id(t) ? { ...x, active: !x.active } : x)), [
-      `${t.active ? 'Deactivated' : 'Activated'} ${k.noun} ${t.name}`,
-      k.target,
-    ])
-    toast(`${t.name} ${t.active ? 'hidden from' : 'available in'} the app`)
+  const persist = async (next, msg) => {
+    try {
+      await setConfig(k.config, next)
+      toast(msg)
+      return true
+    } catch (e) {
+      toast(errorText(e), 'error')
+      return false
+    }
   }
 
-  const save = data => {
+  const toggle = t =>
+    persist(
+      list.map(x => (k.id(x) === k.id(t) ? { ...x, active: !x.active } : x)),
+      `${t.name} ${t.active ? 'hidden from' : 'available in'} the app`,
+    )
+
+  const save = async data => {
     const t = editing
-    const changes = diff(t, data)
-    if (changes.length) {
-      setConfig(k.config, l => l.map(x => (k.id(x) === k.id(t) ? { ...x, ...data } : x)), [
-        `Edited ${k.noun} ${t.name}: ${changes.join(', ')}`,
-        k.target,
-      ])
-      toast(`${data.name} saved`)
-    }
-    setEditing(null)
+    let ok = true
+    if (diff(t, data).length) ok = await persist(list.map(x => (k.id(x) === k.id(t) ? { ...x, ...data } : x)), `${data.name} saved`)
+    if (ok) setEditing(null)
   }
 
   return (
@@ -251,7 +282,11 @@ export default function VipPage() {
                 <span className="a-stat-value" style={{ marginTop: 0 }}>
                   {inr(t.price)}
                 </span>
-                {tab === 'vip' ? <span className="a-muted">/ {t.days} days</span> : <span className="a-muted">one-time</span>}
+                {tab === 'vip' ? (
+                  <span className="a-muted">/ {t.days} days</span>
+                ) : (
+                  <span className="a-muted">one-time{t.coinsBack ? ` · ${num(t.coinsBack)} coins back` : ''}</span>
+                )}
               </div>
               <ul className="a-stack" style={{ gap: 6, listStyle: 'none', padding: 0, margin: 0 }}>
                 {t.perks.map(p => (
@@ -266,7 +301,7 @@ export default function VipPage() {
         </div>
 
         <div className="a-stack">
-          <Card title="Users per VIP level" subtitle={`${num(vipCount)} of ${num(db.users.length)} users have VIP`}>
+          <Card title="Users per VIP level" subtitle={vc ? `${num(vipCount)} of ${num(vc.all)} users have VIP` : 'Loading…'}>
             <BarList items={members} format={num} />
           </Card>
           {tab === 'royal' ? (

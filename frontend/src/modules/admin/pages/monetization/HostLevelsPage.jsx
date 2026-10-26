@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react'
 import { AlertTriangle, Plus, Save, Trash2, Undo2, X } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { useApi } from '../../hooks/useApi'
+import { errorText } from '../../api/client'
 import { Badge, Button, Card, Confirm, Field, Input, PageHeader, Seg, Select } from '../../components/ui'
 import { BarList } from '../../components/charts'
 import { inr, num, pct } from '../../utils/format'
@@ -25,7 +27,7 @@ const toDraft = (levels, tiers) => ({
 
 const toNum = s => (String(s).trim() === '' ? NaN : Number(s))
 
-function SaveBar({ count, invalid, onDiscard, onSave }) {
+function SaveBar({ count, invalid, saving, onDiscard, onSave }) {
   return (
     <div
       className="a-row wrap"
@@ -53,8 +55,8 @@ function SaveBar({ count, invalid, onDiscard, onSave }) {
       <Button icon={Undo2} onClick={onDiscard}>
         Discard
       </Button>
-      <Button variant="primary" icon={Save} disabled={!!invalid} onClick={onSave}>
-        Save
+      <Button variant="primary" icon={Save} disabled={!!invalid || saving} onClick={onSave}>
+        {saving ? 'Saving…' : 'Save'}
       </Button>
     </div>
   )
@@ -147,6 +149,13 @@ export default function HostLevelsPage() {
   const [draft, setDraft] = useState(() => toDraft(hostLevels, rateTiers))
   const [removing, setRemoving] = useState(false)
   const [preview, setPreview] = useState({ level: '2', type: 'video' })
+  const [saving, setSaving] = useState(false)
+  // Hosts for the per-level and price-usage breakdowns (first 100 approved hosts).
+  // TODO(api): exact breakdown for any number of hosts — want GET /admin/hosts/stats →
+  // { total, byLevel: { [level]: n }, byRate: { video: { [rate]: n }, voice: { [rate]: n } } }.
+  const hostsRes = useApi('/admin/hosts', { limit: 100 })
+  const hosts = useMemo(() => hostsRes.data?.items || [], [hostsRes.data])
+  const hostTotal = hostsRes.data?.total ?? hosts.length
 
   const levels = useMemo(
     () => draft.levels.map(l => ({ level: l.level, minutes: toNum(l.minutes), maxRate: toNum(l.maxRate), commissionDiscount: toNum(l.commissionDiscount) })),
@@ -196,19 +205,20 @@ export default function HostLevelsPage() {
 
   const hostsPerLevel = useMemo(() => {
     const counts = {}
-    for (const h of db.hosts) counts[h.level] = (counts[h.level] || 0) + 1
+    for (const h of hosts) counts[h.level] = (counts[h.level] || 0) + 1
     const all = new Set([...levels.map(l => l.level), ...Object.keys(counts).map(Number)])
     return [...all].sort((a, b) => a - b).map(l => ({ label: `Level ${l}`, value: counts[l] || 0 }))
-  }, [db.hosts, levels])
+  }, [hosts, levels])
 
   const usage = useMemo(() => {
     const out = { video: {}, voice: {} }
-    for (const h of db.hosts) {
+    for (const h of hosts) {
+      if (!h.rates) continue
       out.video[h.rates.video] = (out.video[h.rates.video] || 0) + 1
       out.voice[h.rates.voice] = (out.voice[h.rates.voice] || 0) + 1
     }
     return out
-  }, [db.hosts])
+  }, [hosts])
 
   const setLevel = (i, k, v) => setDraft(d => ({ ...d, levels: d.levels.map((l, j) => (j === i ? { ...l, [k]: v } : l)) }))
 
@@ -230,12 +240,22 @@ export default function HostLevelsPage() {
   }
 
   const top = levels[levels.length - 1]
-  const hostsAtTop = top ? db.hosts.filter(h => h.level === top.level).length : 0
+  const hostsAtTop = top ? hosts.filter(h => h.level === top.level).length : 0
 
-  const save = () => {
-    setConfig('hostLevels', levels.map(l => ({ ...l })), null)
-    setConfig('rateTiers', { video: [...draft.video], voice: [...draft.voice] }, [`Updated host levels: ${changes.join(', ')}`, 'Host levels'])
-    toast(`Host levels saved · ${changes.length} change${changes.length === 1 ? '' : 's'}`)
+  const save = async () => {
+    setSaving(true)
+    try {
+      const sortNum = list => [...list].sort((a, b) => a - b)
+      const savedLevels = await setConfig('hostLevels', levels.map(l => ({ ...l })))
+      const savedTiers = await setConfig('rateTiers', { video: sortNum(draft.video), voice: sortNum(draft.voice) })
+      setDraft(toDraft(savedLevels, savedTiers))
+      toast(`Host levels saved · ${changes.length} change${changes.length === 1 ? '' : 's'}`)
+      hostsRes.reload()
+    } catch (e) {
+      toast(errorText(e), 'error')
+    } finally {
+      setSaving(false)
+    }
   }
 
   // ---- Preview
@@ -383,14 +403,14 @@ export default function HostLevelsPage() {
             </div>
           </Card>
 
-          <Card title="Hosts per level" subtitle={`${num(db.hosts.length)} hosts`}>
+          <Card title="Hosts per level" subtitle={`${num(hostTotal)} hosts${hostTotal > hosts.length ? ` · first ${num(hosts.length)} shown` : ''}`}>
             <BarList items={hostsPerLevel} format={num} />
           </Card>
         </div>
       </div>
 
       {dirty ? (
-        <SaveBar count={changes.length} invalid={invalid} onDiscard={() => setDraft(toDraft(hostLevels, rateTiers))} onSave={save} />
+        <SaveBar count={changes.length} invalid={invalid} saving={saving} onDiscard={() => setDraft(toDraft(hostLevels, rateTiers))} onSave={save} />
       ) : null}
 
       <Confirm

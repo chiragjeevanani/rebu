@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { AlertTriangle, Plus, RotateCcw, Save, X } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { errorText } from '../../api/client'
+import { ago } from '../../utils/format'
 import { Badge, Button, Card, Field, Input, Modal, PageHeader, Select, Setting, Switch, Tabs, Textarea } from '../../components/ui'
 
 const pick = (obj, keys) => Object.fromEntries(keys.map(k => [k, obj[k]]))
@@ -111,19 +113,23 @@ function ChipEditor({ values, onChange, placeholder, lower }) {
   )
 }
 
-function SaveBar({ dirty, error, onDiscard, onSave }) {
+function SaveBar({ dirty, error, busy, meta, onDiscard, onSave }) {
   return (
     <div
       className="a-card a-row"
       style={{ position: 'sticky', bottom: 16, padding: '12px 16px', marginTop: 16, zIndex: 2, boxShadow: dirty ? 'var(--shadow-lg)' : undefined }}
     >
-      <span className={`a-small ${error ? 'a-danger' : 'a-muted'}`}>{error || (dirty ? 'You have unsaved changes' : 'All changes saved')}</span>
+      <span className={`a-small ${error ? 'a-danger' : 'a-muted'}`}>{error ||
+          (dirty
+            ? 'You have unsaved changes'
+            : `All changes saved${meta?.updatedAt ? ` · last updated ${ago(meta.updatedAt)}${meta.updatedBy ? ` by ${meta.updatedBy}` : ''}` : ''}`)}
+      </span>
       <span className="a-spacer" />
       <Button variant="ghost" icon={RotateCcw} disabled={!dirty} onClick={onDiscard}>
         Discard
       </Button>
-      <Button variant="primary" icon={Save} disabled={!dirty || !!error} onClick={onSave}>
-        Save changes
+      <Button variant="primary" icon={Save} disabled={!dirty || !!error || busy} onClick={onSave}>
+        {busy ? 'Saving…' : 'Save changes'}
       </Button>
     </div>
   )
@@ -249,13 +255,26 @@ function LoginTab({ d, set }) {
       </Card>
       <Card title="Test login" subtitle="For app store reviewers and QA. This number always accepts the test OTP without sending an SMS.">
         <div className="a-stack">
-          <Warn>Remove the test number before launch. Anyone who knows it can sign in.</Warn>
+          {d.otp.testNumber ? <Warn>Anyone with this number and OTP can sign in. Clear it once review is done.</Warn> : null}
           <div className="a-grid c2">
-            <Field label="Test phone number" hint="Leave empty to turn off">
-              <Input className="a-mono" value={d.otp.testNumber} inputMode="numeric" onChange={e => otp({ testNumber: e.target.value.replace(/\D/g, '').slice(0, 10) })} />
+            <Field label="Test phone number" hint="10-digit mobile, no +91. Leave empty to turn off" error={testNumberError(d.otp)}>
+              <Input
+                className="a-mono"
+                inputMode="numeric"
+                maxLength={10}
+                value={d.otp.testNumber || ''}
+                onChange={e => otp({ testNumber: e.target.value.replace(/D/g, '') })}
+                placeholder="9876543210"
+              />
             </Field>
-            <Field label="Test OTP" error={d.otp.testNumber && d.otp.testOtp.length !== d.otp.length ? `Must be ${d.otp.length} digits` : null}>
-              <Input className="a-mono" value={d.otp.testOtp} inputMode="numeric" onChange={e => otp({ testOtp: e.target.value.replace(/\D/g, '').slice(0, 6) })} />
+            <Field label="Test OTP" hint="4–8 digits" error={testOtpError(d.otp)}>
+              <Input
+                className="a-mono"
+                inputMode="numeric"
+                maxLength={8}
+                value={d.otp.testOtp || ''}
+                onChange={e => otp({ testOtp: e.target.value.replace(/D/g, '') })}
+              />
             </Field>
           </div>
         </div>
@@ -264,14 +283,21 @@ function LoginTab({ d, set }) {
   )
 }
 
+// Mirrors the server: '' or a 10-digit Indian mobile (6–9 first), and '' or 4–8 digits.
+const testNumberError = o => (o.testNumber && !/^[6-9]d{9}$/.test(o.testNumber) ? '10 digits, starting 6–9' : null)
+const testOtpError = o => {
+  if (o.testOtp && !/^d{4,8}$/.test(o.testOtp)) return '4–8 digits'
+  if (o.testNumber && !o.testOtp) return 'Set an OTP for the test number'
+  return null
+}
+
 const loginError = d => {
   if (!Object.values(d.login).some(Boolean)) return 'Keep at least one login method on'
-  const { expirySecs, resendSecs, testNumber, testOtp, length } = d.otp
+  if (testNumberError(d.otp) || testOtpError(d.otp)) return testNumberError(d.otp) || testOtpError(d.otp)
+  const { expirySecs, resendSecs } = d.otp
   if (!(expirySecs >= 60 && expirySecs <= 900)) return 'OTP expiry must be 60–900 seconds'
   if (!(resendSecs >= 15 && resendSecs <= 120)) return 'Resend wait must be 15–120 seconds'
   if (resendSecs >= expirySecs) return 'Resend wait must be shorter than the expiry'
-  if (testNumber && testNumber.length !== 10) return 'Test number must be 10 digits'
-  if (testNumber && testOtp.length !== length) return `Test OTP must be ${length} digits`
   return null
 }
 
@@ -375,17 +401,23 @@ const PANELS = {
   moderation: [ModerationTab, moderationError],
 }
 
-function Editor({ tab, settings, onSave }) {
+function Editor({ tab, settings, meta, onSave }) {
   const keys = TABS.find(t => t.value === tab).keys
   const saved = pick(settings, keys)
   const [draft, setDraft] = useState(saved)
   const [Panel, validate] = PANELS[tab]
   const dirty = !same(draft, saved)
   const error = dirty ? validate(draft) : null
+  const [busy, setBusy] = useState(false)
+  const save = async () => {
+    setBusy(true)
+    await onSave(draft)
+    setBusy(false)
+  }
   return (
     <>
       <Panel d={draft} set={patch => setDraft(x => ({ ...x, ...patch }))} />
-      <SaveBar dirty={dirty} error={error} onDiscard={() => setDraft(saved)} onSave={() => onSave(draft)} />
+      <SaveBar dirty={dirty} error={error} busy={busy} meta={meta} onDiscard={() => setDraft(saved)} onSave={save} />
     </>
   )
 }
@@ -395,7 +427,7 @@ function ResetModal({ open, onClose, onReset }) {
   return (
     <Modal
       open={open}
-      title="Reset demo data?"
+      title="Reset mock data?"
       onClose={onClose}
       footer={
         <>
@@ -408,7 +440,7 @@ function ResetModal({ open, onClose, onReset }) {
     >
       <div className="a-stack">
         <p className="a-muted">
-          Every user, host, payment, setting and audit entry goes back to the original demo data. Changes made by all admins are lost. This can’t be undone.
+          Restores the client-side demo data that pages without a backend still use. Server data and settings aren’t touched.
         </p>
         <Field label={<>Type <span className="a-mono">RESET</span> to confirm</>}>
           <Input className="a-mono" value={text} onChange={e => setText(e.target.value)} autoFocus />
@@ -419,7 +451,7 @@ function ResetModal({ open, onClose, onReset }) {
 }
 
 export default function AppSettingsPage() {
-  const { db, me, setConfig, reset, log } = useStore()
+  const { db, me, setConfig, configMeta, reset } = useStore()
   const toast = useToast()
   const [tab, setTab] = useState('general')
   const [resetting, setResetting] = useState(false)
@@ -428,10 +460,14 @@ export default function AppSettingsPage() {
 
   const tabs = [...TABS, ...(superAdmin ? [{ value: 'danger', label: 'Danger zone' }] : [])]
 
-  const save = draft => {
+  const save = async draft => {
     const name = TABS.find(t => t.value === tab).label
-    setConfig('settings', s => ({ ...s, ...draft }), [`Updated ${name} settings`, 'Settings'])
-    toast(`${name} settings saved`)
+    try {
+      await setConfig('settings', s => ({ ...s, ...draft }))
+      toast(`${name} settings saved`)
+    } catch (e) {
+      toast(errorText(e), 'error')
+    }
   }
 
   return (
@@ -446,14 +482,14 @@ export default function AppSettingsPage() {
 
       {tab === 'danger' && superAdmin ? (
         <Card title="Danger zone" subtitle="Only super admins see this." style={{ borderColor: 'var(--danger)' }}>
-          <Setting title="Reset demo data" description="Restores every collection and setting to the original demo data. Your sign-in stays.">
+          <Setting title="Reset mock data" description="Restores the client-side demo data still used where the backend has no endpoint yet. Server data isn’t affected.">
             <Button variant="soft-danger" icon={RotateCcw} onClick={() => setResetting(true)}>
-              Reset demo data
+              Reset mock data
             </Button>
           </Setting>
         </Card>
       ) : tab !== 'danger' ? (
-        <Editor key={tab} tab={tab} settings={settings} onSave={save} />
+        <Editor key={tab} tab={tab} settings={settings} meta={configMeta.settings} onSave={save} />
       ) : null}
 
       {resetting ? (
@@ -462,10 +498,9 @@ export default function AppSettingsPage() {
           onClose={() => setResetting(false)}
           onReset={() => {
             reset()
-            log('Reset all demo data', 'System')
             setResetting(false)
             setTab('general')
-            toast('Demo data reset')
+            toast('Mock data reset')
           }}
         />
       ) : null}

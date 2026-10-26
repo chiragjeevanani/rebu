@@ -31,8 +31,12 @@ import {
   WifiOff,
 } from 'lucide-react-native';
 import { colors, fonts, radius } from '../../theme';
-import { GIFTS, SONGS } from '../../data/mock';
-import { inr, netPerMinute, split } from '../../data/economy';
+import { SONGS } from '../../data/mock';
+import { RtcSurfaceView } from 'react-native-agora';
+import { post } from '../../api/client';
+import { useSocketEvent } from '../../api/socket';
+import { useAgoraChannel } from '../../media/agora';
+import { inr, netPerMinute } from '../../data/economy';
 import { useApp } from '../../context/AppContext';
 import Txt from '../../components/Txt';
 import Avatar from '../../components/Avatar';
@@ -42,6 +46,7 @@ import Sheet from '../../components/Sheet';
 import { CoinIcon } from '../../components/CoinPill';
 import ListRow from '../../components/ListRow';
 import { useSecureScreen } from '../../utils/secure';
+import { OUTCOME } from '../../utils/calls';
 
 const FILTERS = [
   { key: 'none', label: 'Natural', tint: 'transparent' },
@@ -78,48 +83,37 @@ function SideButton({ icon: Icon, label, active, onPress, badge }) {
   );
 }
 
-// How long we keep trying to reconnect before the call is ended as dropped.
-const RECONNECT_TIMEOUT = 20;
-// How long an outgoing call rings before it counts as not answered.
-const RING_TIMEOUT = 8000;
-
 export default function CallScreen({ navigation, route }) {
   useSecureScreen();
   const {
     user: other,
     video: startVideo = true,
     random,
-    incoming, // host answering a user's call: the host earns, nobody is charged here
+    incoming, // host side: the call was accepted on IncomingCallScreen
   } = route.params;
-  const {
-    user: me,
-    spendCoins,
-    getCoins,
-    addCall,
-    addTransaction,
-    addEarning,
-    hostRates,
-    hostAgency,
-  } = useApp();
+  const { user: me, hostRates, hostAgency } = useApp();
   const insets = useSafeAreaInsets();
   const rate = startVideo ? other.videoRate || 40 : other.voiceRate || 20;
-  // Host side: the caller pays the host's own price; this is the host's take.
   const hostType = startVideo ? 'video' : 'voice';
   const earnRate = netPerMinute(hostRates[hostType], hostType, hostAgency);
 
-  // phase: ringing → connected ⇄ reconnecting
+  // The server owns the call: it rings the host, bills each minute and ends it.
+  const [call, setCall] = useState(route.params.call || null);
+  const [agora, setAgora] = useState(route.params.agora || null);
   const [phase, setPhase] = useState(incoming ? 'connected' : 'ringing');
   const connected = phase === 'connected';
-  const [secs, setSecs] = useState(0); // connected seconds only
+  const [secs, setSecs] = useState(0);
   const [charged, setCharged] = useState(0);
+  const [earned, setEarned] = useState(0);
   const [lowBalance, setLowBalance] = useState(false);
-  const [offlineFor, setOfflineFor] = useState(0);
+  const [netDown, setNetDown] = useState(false);
   const [menu, setMenu] = useState(false);
   const ended = useRef(false);
-  const paidMinutes = useRef(0);
+  const callRef = useRef(call);
+  callRef.current = call;
   const [muted, setMuted] = useState(false);
   const [speaker, setSpeaker] = useState(true);
-  const [video, setVideo] = useState(startVideo);
+  const [video] = useState(startVideo);
   const [invisible, setInvisible] = useState(false);
   const [filter, setFilter] = useState('none');
   const [sheet, setSheet] = useState(null); // 'filters' | 'music' | 'gift'
@@ -128,140 +122,135 @@ export default function CallScreen({ navigation, route }) {
   const [toast, setToast] = useState(null);
   const toastAnim = useRef(new Animated.Value(0)).current;
 
+  const rtc = useAgoraChannel(agora, { video: startVideo });
+  const remoteUid = rtc.remoteUids[0];
+
   const finish = (status, extra = {}) => {
     if (ended.current) return;
     ended.current = true;
-    const minutes = Math.ceil(secs / 60);
-    const type = video ? 'video' : 'voice';
-    const duration = secs > 0 ? fmt(secs) : null;
-    const photo = other.photo || other.photos?.[0];
-
-    if (incoming) {
-      if (secs > 0) {
-        addEarning({
-          source: type,
-          from: other.name,
-          photo,
-          minutes,
-          coins: minutes * hostRates[type],
-          agency: hostAgency,
-          detail: `${minutes} min × ${hostRates[type]} coins`,
-        });
-      }
-      addCall({
-        name: other.name,
-        photo,
-        type,
-        dir: 'incoming',
-        status,
-        duration,
-        coins: 0,
-      });
-    } else {
-      addCall({
-        name: random ? 'Random match' : other.name,
-        photo,
-        type,
-        dir: 'outgoing',
-        status,
-        duration,
-        coins: charged,
-        random,
-      });
-      if (charged > 0) {
-        addTransaction({
-          type: 'call',
-          title: `${video ? 'Video' : 'Voice'} call · ${other.name}`,
-          sub: `${minutes} min × ${rate} coins`,
-          amount: -charged,
-        });
-      }
-    }
     navigation.replace('CallEnded', {
       user: other,
       status,
-      duration,
-      coins: charged,
-      earned: incoming
-        ? split({
-            source: type,
-            coins: minutes * hostRates[type],
-            agency: hostAgency,
-          }).net
-        : 0,
+      duration: secs > 0 ? fmt(secs) : null,
+      coins: extra.charged ?? charged,
+      earned: extra.earned ?? earned,
       incoming,
       video,
       random,
+      callId: callRef.current?.id,
       ...extra,
     });
   };
 
-  // Ringing → connected, or not answered when the host is offline/busy.
+  // Start the call (caller side). Random matches arrive already started.
   useEffect(() => {
-    if (phase !== 'ringing') return;
-    const answers = random || other.online !== false;
-    const t = setTimeout(
-      () => (answers ? setPhase('connected') : finish('no_answer')),
-      answers ? 2000 : RING_TIMEOUT,
-    );
-    return () => clearTimeout(t);
+    if (incoming || route.params.call) return;
+    let gone = false;
+    (async () => {
+      try {
+        const r = random
+          ? await post('/calls/random', { type: hostType })
+          : await post('/calls', { hostId: other.id, type: hostType });
+        if (gone) {
+          post(`/calls/${r.call.id}/cancel`).catch(() => {});
+          return;
+        }
+        setCall(r.call);
+        setAgora(r.agora);
+      } catch (e) {
+        if (gone) return;
+        if (e.code === 'insufficient_coins') {
+          ended.current = true;
+          navigation.replace('Wallet');
+          return;
+        }
+        finish(
+          e.code === 'host_busy' || e.code === 'host_offline'
+            ? 'no_answer'
+            : 'failed',
+          {
+            note: e.message,
+          },
+        );
+      }
+    })();
+    return () => {
+      gone = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase]);
-
-  // Call timer: only counts while actually connected.
-  useEffect(() => {
-    if (!connected) return;
-    const i = setInterval(() => setSecs(s => s + 1), 1000);
-    return () => clearInterval(i);
-  }, [connected]);
-
-  // Billing: each connected minute is paid at its start (0:00, 1:00, 2:00 …).
-  // If the next minute can't be paid, the call ends on its own.
-  useEffect(() => {
-    const minute = Math.floor(secs / 60) + 1;
-    if (!connected || incoming || minute <= paidMinutes.current) return;
-    paidMinutes.current = minute;
-    if (!spendCoins(rate)) {
-      finish('balance');
-      return;
-    }
-    setCharged(c => c + rate);
-    setLowBalance(getCoins() < rate);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [secs, connected]);
-
-  // Network loss: pause the call (and billing), give it time to recover.
-  useEffect(() => {
-    return NetInfo.addEventListener(state => {
-      const online = state.isConnected && state.isInternetReachable !== false;
-      setPhase(p => {
-        if (p === 'connected' && !online) return 'reconnecting';
-        if (p === 'reconnecting' && online) return 'connected';
-        return p;
-      });
-    });
   }, []);
 
-  useEffect(() => {
-    if (phase !== 'reconnecting') {
-      setOfflineFor(0);
-      return;
+  // Leaving this screen any other way (back gesture, app reload) must never
+  // leave a call running on the server and billing the user.
+  useEffect(
+    () => () => {
+      const c = callRef.current;
+      if (c && !ended.current) {
+        // Connected → end; still ringing → cancel (the server rejects the other).
+        post(`/calls/${c.id}/end`).catch(() =>
+          post(`/calls/${c.id}/cancel`).catch(() => {}),
+        );
+      }
+    },
+    [],
+  );
+
+  const mine = p => p && callRef.current && p.callId === callRef.current.id;
+  useSocketEvent('call:accepted', p => {
+    if (p?.call?.id === callRef.current?.id) {
+      setCall(p.call);
+      setPhase('connected');
     }
-    const i = setInterval(() => setOfflineFor(s => s + 1), 1000);
-    return () => clearInterval(i);
-  }, [phase]);
+  });
+  useSocketEvent('call:tick', p => {
+    if (!mine(p)) return;
+    setCharged(p.charged);
+    setLowBalance(p.balance < p.rate);
+  });
+  useSocketEvent('call:low_balance', p => mine(p) && setLowBalance(true));
+  useSocketEvent('call:ended', p => {
+    if (!mine(p)) return;
+    finish(
+      p.status === 'ended'
+        ? OUTCOME[p.reason] || 'completed'
+        : OUTCOME[p.reason] || p.status,
+      {
+        charged: p.charged ?? charged,
+        earned: p.earned ?? earned,
+        // The server's connected time is the one that was billed.
+        ...(p.duration > 0 && { duration: fmt(p.duration) }),
+      },
+    );
+  });
+  useSocketEvent('gift:received', p => {
+    if (p?.context?.type === 'call' && incoming) showGift(p.gift, p.from?.name);
+  });
 
-  useEffect(() => {
-    if (offlineFor >= RECONNECT_TIMEOUT) finish('dropped');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offlineFor]);
-
+  // Connected time comes from the server's connect timestamp.
   useEffect(() => {
     if (!connected) return;
-    const t = setTimeout(() => showGift(GIFTS[0], other.name), 6000);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connected]);
+    const from = call?.connectedAt
+      ? new Date(call.connectedAt).getTime()
+      : Date.now();
+    const tick = () =>
+      setSecs(Math.max(0, Math.floor((Date.now() - from) / 1000)));
+    tick();
+    const i = setInterval(tick, 1000);
+    return () => clearInterval(i);
+  }, [connected, call?.connectedAt]);
+
+  // Network banner only; the server ends the call if we stay away too long.
+  useEffect(
+    () =>
+      NetInfo.addEventListener(st =>
+        setNetDown(!(st.isConnected && st.isInternetReachable !== false)),
+      ),
+    [],
+  );
+
+  useEffect(() => {
+    if (incoming && connected) setEarned(e => e);
+  }, [incoming, connected]);
 
   const showGift = (g, from) => {
     setToast({ g, from });
@@ -277,18 +266,36 @@ export default function CallScreen({ navigation, route }) {
     ]).start(() => setToast(null));
   };
 
-  // Hanging up while still ringing is a cancelled call (never charged).
-  const end = () => finish(phase === 'ringing' ? 'cancelled' : 'completed');
+  // Hanging up: cancel while ringing, end once connected. The server's
+  // call:ended event (or this response) moves us to the summary.
+  const end = async () => {
+    const c = callRef.current;
+    if (!c) return finish('cancelled');
+    try {
+      const r = await post(
+        `/calls/${c.id}/${phase === 'ringing' && !incoming ? 'cancel' : 'end'}`,
+      );
+      const st = r.call?.status;
+      if (st && st !== 'ringing' && st !== 'connected') {
+        finish(phase === 'ringing' && !incoming ? 'cancelled' : 'completed', {
+          charged: r.call.chargedCoins ?? charged,
+        });
+      }
+    } catch {
+      finish(phase === 'ringing' ? 'cancelled' : 'completed');
+    }
+  };
   const block = () => {
     setMenu(false);
-    finish(phase === 'ringing' ? 'cancelled' : 'completed', { blocked: true });
+    if (other.id) post(`/me/blocked/${other.id}`).catch(() => {});
+    end();
   };
   const statusText =
     phase === 'ringing'
       ? random
         ? 'Connecting…'
         : 'Ringing…'
-      : phase === 'reconnecting'
+      : netDown
       ? 'Reconnecting…'
       : fmt(secs);
   const tint = FILTERS.find(f => f.key === filter).tint;
@@ -297,7 +304,12 @@ export default function CallScreen({ navigation, route }) {
   return (
     <View style={styles.root}>
       {/* Remote stream placeholder */}
-      {video ? (
+      {video && connected && remoteUid ? (
+        <RtcSurfaceView
+          canvas={{ uid: remoteUid }}
+          style={StyleSheet.absoluteFill}
+        />
+      ) : video ? (
         <Image
           source={{ uri: photo }}
           style={StyleSheet.absoluteFill}
@@ -380,6 +392,12 @@ export default function CallScreen({ navigation, route }) {
               <VideoOff size={22} color={colors.white} />
               <Txt style={styles.pipOffText}>Invisible</Txt>
             </View>
+          ) : rtc.live ? (
+            <RtcSurfaceView
+              canvas={{ uid: 0 }}
+              zOrderMediaOverlay
+              style={StyleSheet.absoluteFill}
+            />
           ) : (
             <Image
               source={{ uri: me.photos[0] }}
@@ -407,7 +425,12 @@ export default function CallScreen({ navigation, route }) {
             icon={invisible ? VideoOff : Video}
             label={invisible ? 'Hidden' : 'Camera'}
             active={invisible}
-            onPress={() => setInvisible(v => !v)}
+            onPress={() =>
+              setInvisible(v => {
+                rtc.setCameraOn(v);
+                return !v;
+              })
+            }
           />
         ) : null}
         <SideButton
@@ -466,13 +489,13 @@ export default function CallScreen({ navigation, route }) {
       ) : null}
 
       {/* Reconnecting */}
-      {phase === 'reconnecting' ? (
+      {netDown && connected ? (
         <View style={styles.reconnect}>
           <WifiOff size={30} color={colors.white} />
           <Txt style={styles.reconnectTitle}>Weak connection</Txt>
           <Txt style={styles.reconnectSub}>
-            Reconnecting… billing is paused. Call ends in{' '}
-            {RECONNECT_TIMEOUT - offlineFor}s if the network doesn't return.
+            Reconnecting… if the network doesn’t come back soon the call ends
+            and you’re only charged for connected minutes.
           </Txt>
         </View>
       ) : null}
@@ -501,25 +524,33 @@ export default function CallScreen({ navigation, route }) {
             variant={muted ? 'light' : 'glass'}
             color={muted ? colors.ink : undefined}
             size={52}
-            onPress={() => setMuted(m => !m)}
+            onPress={() =>
+              setMuted(m => {
+                rtc.setMuted(!m);
+                return !m;
+              })
+            }
           />
           <IconButton
             icon={Volume2}
             variant={speaker ? 'glass' : 'light'}
             color={speaker ? undefined : colors.ink}
             size={52}
-            onPress={() => setSpeaker(s => !s)}
+            onPress={() =>
+              setSpeaker(sp => {
+                rtc.setSpeaker(!sp);
+                return !sp;
+              })
+            }
           />
           {video ? (
-            <IconButton icon={SwitchCamera} variant="glass" size={52} />
-          ) : (
             <IconButton
-              icon={Video}
+              icon={SwitchCamera}
               variant="glass"
               size={52}
-              onPress={() => setVideo(true)}
+              onPress={rtc.switchCamera}
             />
-          )}
+          ) : null}
           <IconButton
             icon={PhoneOff}
             variant="gradient"
@@ -632,7 +663,11 @@ export default function CallScreen({ navigation, route }) {
           subtitle="Nudity, abuse, harassment, fake profile…"
           onPress={() => {
             setMenu(false);
-            navigation.navigate('Report', { name: other.name });
+            navigation.navigate('Report', {
+              name: other.name,
+              targetType: incoming ? 'user' : 'host',
+              targetId: other.id,
+            });
           }}
           dark
         />
@@ -652,6 +687,8 @@ export default function CallScreen({ navigation, route }) {
         onClose={() => setSheet(null)}
         to={other.name}
         onSend={g => showGift(g, 'You')}
+        toId={incoming ? undefined : other.id}
+        context={call ? { type: 'call', id: call.id } : undefined}
         onRecharge={() => {
           setSheet(null);
           navigation.navigate('Wallet');

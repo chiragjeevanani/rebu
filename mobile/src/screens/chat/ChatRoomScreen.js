@@ -28,7 +28,11 @@ import {
   Video,
 } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
-import { GIFTS, HOSTS, MESSAGES, MESSAGE_COST } from '../../data/mock';
+import { GIFTS, MESSAGE_COST } from '../../data/mock';
+import { get, post } from '../../api/client';
+import { toBubble } from '../../api/chat';
+import { findHost, toAppHost } from '../../api/hosts';
+import { useSocketEvent } from '../../api/socket';
 import { useApp } from '../../context/AppContext';
 import Txt from '../../components/Txt';
 import Avatar from '../../components/Avatar';
@@ -37,15 +41,6 @@ import GiftSheet from '../../components/GiftSheet';
 import Sheet from '../../components/Sheet';
 import ListRow from '../../components/ListRow';
 import { useSecureScreen } from '../../utils/secure';
-import { inr, split } from '../../data/economy';
-
-// Demo replies a user sends back to a host (each one is a paid message).
-const USER_REPLIES = [
-  'Haha 😄 tell me more',
-  'You’re so sweet ❤️',
-  'Can we video call later?',
-  'What are you doing today?',
-];
 
 const EMOJIS = [
   '😀',
@@ -179,14 +174,20 @@ function Bubble({ m, photo, name }) {
 export default function ChatRoomScreen({ navigation, route }) {
   useSecureScreen();
   const chat = route.params.chat;
-  const host =
-    HOSTS.find(h => h.id === chat.userId || h.name === chat.name) || chat;
-  const { isHost, hostAgency, spendCoins, addTransaction, addEarning } =
-    useApp();
-  const replies = useRef(0);
+  // Opened from a notification we only know the id; the history call returns the profile.
+  const [peer, setPeer] = useState(null);
+  const host = findHost(chat.userId) ||
+    (peer?.isHost ? toAppHost(peer) : null) || {
+      ...chat,
+      ...(peer && { name: peer.name, photo: peer.photo, photos: peer.photos }),
+      id: chat.userId,
+    };
+  const { user: me, isHost, setCoinsFromServer, config, greet } = useApp();
+  const messageCost = config?.economy?.messageCost ?? MESSAGE_COST;
   const [needCoins, setNeedCoins] = useState(false);
+  const [notice, setNotice] = useState('');
   const insets = useSafeAreaInsets();
-  const [messages, setMessages] = useState(MESSAGES);
+  const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
   const [emoji, setEmoji] = useState(false);
   const [gift, setGift] = useState(false);
@@ -194,11 +195,39 @@ export default function ChatRoomScreen({ navigation, route }) {
   const list = useRef(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
 
-  // Tapping "Hi" sends a free first greeting.
+  const scrollDown = () =>
+    setTimeout(() => list.current?.scrollToEnd({ animated: true }), 50);
+  const append = m =>
+    setMessages(ms => (ms.some(x => x.id === m.id) ? ms : [...ms, m]));
+
+  // History (opening the chat also marks it read on the server).
   useEffect(() => {
-    if (route.params?.greeting) push({ type: 'text', text: 'Hi 👋' });
+    (route.params?.greet
+      ? greet(chat.userId).catch(e => setNotice(e.message))
+      : Promise.resolve()
+    )
+      .then(() => get(`/chats/${chat.userId}/messages?limit=50`))
+      .then(r => {
+        setPeer(r.peer);
+        setMessages(r.items.map(m => toBubble(m, me.id)));
+      })
+      .catch(e => setNotice(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [chat.userId]);
+
+  // Live messages in this conversation (theirs and my other devices').
+  useSocketEvent('chat:message', p => {
+    const m = p?.message;
+    if (!m) return;
+    const inThisChat =
+      (m.from === chat.userId && m.to === me.id) ||
+      (m.from === me.id && m.to === chat.userId);
+    if (!inThisChat) return;
+    append(toBubble(m, me.id));
+    if (m.from === chat.userId)
+      post(`/chats/${chat.userId}/read`).catch(() => {});
+    scrollDown();
+  });
 
   useEffect(() => {
     const show = Keyboard.addListener('keyboardDidShow', () => {
@@ -214,68 +243,34 @@ export default function ChatRoomScreen({ navigation, route }) {
     };
   }, []);
 
-  const push = m => {
-    setMessages(ms => [
-      ...ms,
-      { id: String(Date.now()), from: 'me', time: 'now', ...m },
-    ]);
-    setTimeout(() => list.current?.scrollToEnd({ animated: true }), 50);
-  };
-
-  // Users pay per message to a host; hosts reply for free (and earn).
-  const paidPush = m => {
-    if (!isHost) {
-      if (!spendCoins(MESSAGE_COST)) {
-        setNeedCoins(true);
-        return false;
-      }
-      addTransaction({
-        type: 'chat',
-        title: `Message · ${chat.name}`,
-        sub: 'Chat',
-        amount: -MESSAGE_COST,
+  // Users pay per message to a host; the server charges and credits the host.
+  const sendMessage = async m => {
+    setNotice('');
+    try {
+      const r = await post(`/chats/${chat.userId}/messages`, {
+        type: m.type,
+        text: m.text,
+        imageUrl: m.uri,
       });
+      append(toBubble(r.message, me.id));
+      if (typeof r.balance === 'number') setCoinsFromServer(r.balance);
+      setNeedCoins(false);
+      scrollDown();
+      return true;
+    } catch (e) {
+      if (e.code === 'insufficient_coins') setNeedCoins(true);
+      else setNotice(e.message);
+      return false;
     }
-    setNeedCoins(false);
-    push(m);
-    if (isHost) userReplies();
-    return true;
   };
+  const paidPush = m => sendMessage(m);
+  const push = paidPush;
 
-  // Host side (demo): the user answers, paying per message — the host earns.
-  const userReplies = () =>
-    setTimeout(() => {
-      const rec = {
-        source: 'chat',
-        from: chat.name,
-        photo: chat.photo,
-        coins: MESSAGE_COST,
-        agency: hostAgency,
-        detail: '1 paid message',
-      };
-      addEarning(rec);
-      const n = replies.current++;
-      setMessages(ms => [
-        ...ms,
-        {
-          id: `r${Date.now()}`,
-          from: chat.userId || 'them',
-          time: 'now',
-          type: 'text',
-          text: USER_REPLIES[n % USER_REPLIES.length],
-        },
-        {
-          id: `x${Date.now()}`,
-          type: 'earned',
-          text: `+${inr(split(rec).net)} earned from this message`,
-        },
-      ]);
-      setTimeout(() => list.current?.scrollToEnd({ animated: true }), 50);
-    }, 2500);
-
-  const send = () => {
-    if (!text.trim()) return;
-    if (paidPush({ type: 'text', text: text.trim() })) setText('');
+  const send = async () => {
+    const t = text.trim();
+    if (!t) return;
+    setText('');
+    if (!(await sendMessage({ type: 'text', text: t }))) setText(t);
   };
 
   const callUser = video => navigation.navigate('Call', { user: host, video });
@@ -358,10 +353,17 @@ export default function ChatRoomScreen({ navigation, route }) {
           }
         />
 
+        {notice ? (
+          <View style={styles.needCoins}>
+            <Txt variant="small" color={colors.ink} style={styles.flex}>
+              {notice}
+            </Txt>
+          </View>
+        ) : null}
         {needCoins ? (
           <View style={styles.needCoins}>
             <Txt variant="small" color={colors.ink} style={styles.flex}>
-              You need {MESSAGE_COST} coins to send a message.
+              You need {messageCost} coins to send a message.
             </Txt>
             <Txt
               variant="label"
@@ -429,7 +431,7 @@ export default function ChatRoomScreen({ navigation, route }) {
             value={text}
             onChangeText={setText}
             placeholder={
-              isHost ? 'Type a message…' : `Message · ${MESSAGE_COST} coins`
+              isHost ? 'Type a message…' : `Message · ${messageCost} coins`
             }
             placeholderTextColor={colors.textFaint}
             style={styles.input}
@@ -448,7 +450,9 @@ export default function ChatRoomScreen({ navigation, route }) {
         visible={gift}
         onClose={() => setGift(false)}
         to={chat.name}
-        onSend={g => push({ type: 'gift', gift: g.key })}
+        // The server stores the gift as a chat message; it arrives over the socket.
+        toId={chat.userId}
+        context={{ type: 'chat' }}
         onRecharge={() => {
           setGift(false);
           navigation.navigate('Wallet');
@@ -461,7 +465,11 @@ export default function ChatRoomScreen({ navigation, route }) {
           title={`Report ${chat.name}`}
           onPress={() => {
             setMenu(false);
-            navigation.navigate('Report', { name: chat.name });
+            navigation.navigate('Report', {
+              name: host.name,
+              targetType: host.isHost ? 'host' : 'user',
+              targetId: chat.userId,
+            });
           }}
         />
         <ListRow

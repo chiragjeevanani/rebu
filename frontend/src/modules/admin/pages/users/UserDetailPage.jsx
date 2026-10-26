@@ -1,8 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { BadgeCheck, Ban, Coins, RotateCcw, ShieldOff, UserX } from 'lucide-react'
+import { BadgeCheck, Ban, Check, Coins, RotateCcw, ShieldOff, UserX, X } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { useApi } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
+import { canAccess } from '../../routes/nav'
 import {
   Avatar,
   Badge,
@@ -11,10 +14,13 @@ import {
   Confirm,
   DataTable,
   Empty,
+  ErrorState,
   Field,
   Input,
+  Loading,
   Modal,
   PageHeader,
+  Pending,
   Seg,
   Select,
   Stat,
@@ -107,54 +113,164 @@ function Suspend({ open, onClose, onSave }) {
   )
 }
 
+const callStatus = s => (s === 'ended' ? 'completed' : s === 'connected' || s === 'ringing' ? 'ongoing' : s)
+const deviceText = d => (d && typeof d === 'object' ? [d.platform, d.model, d.appVersion && `v${d.appVersion}`].filter(Boolean).join(' · ') : d) || '—'
+
 export default function UserDetailPage() {
   const { id } = useParams()
-  const { db, update } = useStore()
-  const toast = useToast()
-  const [tab, setTab] = useState('overview')
-  const [modal, setModal] = useState(null) // coins | suspend | ban
-  const u = db.users.find(x => x.id === id)
-  const [notes, setNotes] = useState(u?.notes || '')
-
-  const calls = useMemo(() => db.calls.filter(c => c.userId === id), [db.calls, id])
-  const payments = useMemo(() => db.transactions.filter(t => t.userId === id), [db.transactions, id])
-  const reports = useMemo(() => db.reports.filter(r => r.target.id === id || r.reporter.id === id), [db.reports, id])
-  const history = useMemo(() => db.audit.filter(a => String(a.target).includes(id)), [db.audit, id])
-
-  if (!u) {
+  const res = useApi(`/admin/users/${id}`)
+  if (res.error?.status === 404 || res.error?.status === 400) {
     return (
       <Card>
         <Empty icon={UserX} title="User not found" text={`No user with ID ${id}.`} />
       </Card>
     )
   }
+  return <Pending res={res}>{d => <UserDetail d={d} reload={res.reload} />}</Pending>
+}
 
-  const setStatus = (status, reason, extra = {}) => {
-    update('users', u.id, { status, statusReason: reason || '', ...extra }, [
-      `${status === 'active' ? 'Reactivated' : status === 'banned' ? 'Banned' : 'Suspended'} user${reason ? ` — ${reason}` : ''}`,
-      u.id,
-    ])
-    toast(`${u.name} is now ${status}`)
+function Notes({ user, onSaved }) {
+  const toast = useToast()
+  const [notes, setNotes] = useState(user.notes || '')
+  const [busy, setBusy] = useState(false)
+  return (
+    <Card
+      title="Internal notes"
+      subtitle="Only visible to admins"
+      actions={
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={busy || notes === (user.notes || '')}
+          onClick={async () => {
+            setBusy(true)
+            try {
+              await api.patch(`/admin/users/${user.id}`, { notes })
+              toast('Notes saved')
+              onSaved()
+            } catch (e) {
+              toast(errorText(e), 'error')
+            }
+            setBusy(false)
+          }}
+        >
+          Save
+        </Button>
+      }
+    >
+      <Textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="Add context for other admins…" style={{ minHeight: 170 }} />
+    </Card>
+  )
+}
+
+/** Pending blue-tick request: the selfie beside the profile photos, approve or reject. */
+function VerificationRequest({ user: u, onDecide }) {
+  const [busy, setBusy] = useState(false)
+  const decide = async ok => {
+    setBusy(true)
+    await onDecide(ok)
+    setBusy(false)
   }
+  const tile = { width: 160, height: 200, objectFit: 'cover', borderRadius: 12, display: 'block', background: 'var(--surface-2)' }
+  return (
+    <Card
+      title="Verification request"
+      subtitle={`Asked for a blue tick ${u.verification.at ? ago(u.verification.at) : ''}. Check the selfie matches the profile photos.`}
+      style={{ marginBottom: 20 }}
+      footer={
+        <div className="a-row" style={{ gap: 8, justifyContent: 'flex-end' }}>
+          <Button variant="soft-danger" icon={X} disabled={busy} onClick={() => decide(false)}>
+            Reject
+          </Button>
+          <Button variant="primary" icon={Check} disabled={busy} onClick={() => decide(true)}>
+            Approve blue tick
+          </Button>
+        </div>
+      }
+    >
+      <div className="a-row wrap" style={{ gap: 16, alignItems: 'flex-start' }}>
+        <div>
+          <div className="a-small a-muted" style={{ marginBottom: 6 }}>Selfie</div>
+          {u.verification.selfie ? (
+            <a href={u.verification.selfie} target="_blank" rel="noreferrer">
+              <img src={u.verification.selfie} alt="Verification selfie" style={{ ...tile, outline: '2px solid var(--info)' }} />
+            </a>
+          ) : (
+            <div style={tile} className="a-faint" />
+          )}
+        </div>
+        <div>
+          <div className="a-small a-muted" style={{ marginBottom: 6 }}>Profile photos</div>
+          {u.photos?.length ? (
+            <div className="a-row wrap" style={{ gap: 10 }}>
+              {u.photos.map(p => (
+                <a key={p} href={p} target="_blank" rel="noreferrer">
+                  <img src={p} alt="" loading="lazy" style={tile} />
+                </a>
+              ))}
+            </div>
+          ) : (
+            <span className="a-muted">No profile photos to compare with.</span>
+          )}
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+function UserDetail({ d, reload }) {
+  const { me } = useStore()
+  const toast = useToast()
+  const [tab, setTab] = useState('overview')
+  const [modal, setModal] = useState(null) // coins | suspend | ban
+  const u = d.user
+  const id = u.id
+  const canAudit = canAccess(me.role, 'audit')
+  const historyRes = useApi(canAudit && tab === 'history' ? '/admin/audit' : null, { target: id, limit: 50 })
+  const history = historyRes.data?.items || []
+
+  const calls = d.calls.map(c => ({ ...c, status: callStatus(c.status), ts: c.connectedAt || c.createdAt, coins: c.chargedCoins || 0 }))
+  const payments = d.payments.map(p => ({ ...p, ts: p.createdAt, status: p.status === 'created' ? 'pending' : p.status }))
+  const reports = [
+    ...d.reports.map(r => ({ ...r, against: true })),
+    ...d.reportsFiled.map(r => ({ ...r, id: `${r.id}-f`, against: false })),
+  ].map(r => ({ ...r, ts: r.createdAt }))
+  const reportsAgainst = d.reports.length
+
+  const run = async (fn, ok) => {
+    try {
+      await fn()
+      toast(ok)
+      reload()
+      return true
+    } catch (e) {
+      toast(errorText(e), 'error')
+      return false
+    }
+  }
+
+  const setStatus = (status, reason, days) =>
+    run(() => api.post(`/admin/users/${id}/status`, { status, reason: reason || undefined, days: days || undefined }), `${u.name} is now ${status}`)
 
   const paidTotal = payments.filter(p => p.status === 'success').reduce((n, p) => n + p.amount, 0)
 
   return (
     <>
       <PageHeader
-        crumbs={[{ label: 'Users', to: '/admin/users' }, { label: u.name }]}
+        crumbs={[{ label: 'Users', to: '/admin/users' }, { label: u.name || u.phone }]}
         title={
           <span className="a-row" style={{ gap: 14 }}>
             <Avatar src={u.avatar} name={u.name} size={52} />
             <span>
               <span className="a-row" style={{ gap: 8 }}>
-                {u.name}
+                {u.name || 'Unnamed'}
                 {u.verified ? <BadgeCheck size={20} color="var(--info)" /> : null}
               </span>
               <span className="a-row" style={{ gap: 8, marginTop: 4, fontSize: 13, fontWeight: 600 }}>
                 <span className="a-mono a-muted">{u.id}</span>
                 <Status value={u.status} />
                 {u.vip ? <Badge tone="warning">{u.vip >= 4 ? 'VIP Elite' : `VIP ${u.vip}`}</Badge> : null}
+                {u.isHost ? <Badge tone="brand">Host</Badge> : null}
               </span>
             </span>
           </span>
@@ -164,7 +280,10 @@ export default function UserDetailPage() {
             <Button icon={Coins} onClick={() => setModal('coins')}>
               Adjust coins
             </Button>
-            <Button icon={BadgeCheck} onClick={() => update('users', u.id, { verified: !u.verified }, [u.verified ? 'Removed verification' : 'Verified profile', u.id])}>
+            <Button
+              icon={BadgeCheck}
+              onClick={() => run(() => api.patch(`/admin/users/${id}`, { verified: !u.verified }), u.verified ? 'Verification removed' : 'Profile verified')}
+            >
               {u.verified ? 'Unverify' : 'Verify'}
             </Button>
             {u.status === 'active' ? (
@@ -199,8 +318,8 @@ export default function UserDetailPage() {
       <div className="a-grid c4" style={{ marginBottom: 20 }}>
         <Stat label="Coin balance" value={num(u.coins)} icon={Coins} />
         <Stat label="Total spent" value={inr(u.spent)} sub={(n => `${n} successful payment${n === 1 ? '' : 's'}`)(payments.filter(p => p.status === 'success').length)} />
-        <Stat label="Calls" value={num(calls.length || u.calls)} sub={`${num(Math.round(calls.reduce((n, c) => n + c.duration, 0) / 60))} min in sample`} />
-        <Stat label="Reports" value={reports.filter(r => r.target.id === id).length} sub="against this user" />
+        <Stat label="Calls" value={num(calls.length)} sub={`${num(calls.reduce((n, c) => n + (c.minutes || 0), 0))} billed min`} />
+        <Stat label="Reports" value={reportsAgainst} sub="against this user" />
       </div>
 
       <Tabs
@@ -210,52 +329,46 @@ export default function UserDetailPage() {
           { value: 'overview', label: 'Overview' },
           { value: 'calls', label: 'Calls', count: calls.length },
           { value: 'payments', label: 'Payments', count: payments.length },
+          { value: 'coins', label: 'Coin history', count: d.coinTxns.length },
           { value: 'reports', label: 'Reports', count: reports.length },
-          { value: 'history', label: 'Admin history' },
+          ...(canAudit ? [{ value: 'history', label: 'Admin history' }] : []),
         ]}
       />
+
+      {tab === 'overview' && u.verification?.status === 'pending' ? (
+        <VerificationRequest
+          user={u}
+          onDecide={ok =>
+            run(() => api.patch(`/admin/users/${id}`, { verified: ok }), ok ? 'Blue tick approved' : 'Verification request rejected')
+          }
+        />
+      ) : null}
 
       {tab === 'overview' ? (
         <div className="a-grid c2">
           <Card title="Profile">
             <dl className="a-dl">
               <dt>Phone</dt>
-              <dd>{u.phone}</dd>
+              <dd>{u.phone || '—'}</dd>
               <dt>Email</dt>
               <dd>{u.email || '—'}</dd>
               <dt>Gender · age</dt>
               <dd>
-                {u.gender} · {u.age}
+                {u.gender || '—'} · {u.age ?? '—'}
               </dd>
               <dt>City</dt>
-              <dd>{u.city}</dd>
+              <dd>{u.city || '—'}</dd>
               <dt>Device</dt>
-              <dd>{u.device}</dd>
+              <dd>{deviceText(u.device)}</dd>
               <dt>Joined</dt>
               <dd>{dateTime(u.joined)}</dd>
               <dt>Last active</dt>
               <dd>{ago(u.lastActive)}</dd>
+              <dt>Following</dt>
+              <dd>{num(u.following)}</dd>
             </dl>
           </Card>
-          <Card
-            title="Internal notes"
-            subtitle="Only visible to admins"
-            actions={
-              <Button
-                size="sm"
-                variant="primary"
-                disabled={notes === (u.notes || '')}
-                onClick={() => {
-                  update('users', u.id, { notes }, ['Updated notes', u.id])
-                  toast('Notes saved')
-                }}
-              >
-                Save
-              </Button>
-            }
-          >
-            <Textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="Add context for other admins…" style={{ minHeight: 170 }} />
-          </Card>
+          <Notes key={u.notes || ''} user={u} onSaved={reload} />
         </div>
       ) : null}
 
@@ -265,14 +378,14 @@ export default function UserDetailPage() {
             rows={calls}
             initialSort={{ key: 'ts', dir: 'desc' }}
             columns={[
-              { key: 'host', label: 'Host', render: c => <Who src={c.hostAvatar} name={c.hostName} sub={c.id} to={`/admin/hosts/${c.hostId}`} /> },
+              { key: 'host', label: 'Host', render: c => <Who src={c.host?.avatar} name={c.host?.name || 'Host'} sub={c.id} to={`/admin/hosts/${c.host?.id}`} /> },
               { key: 'type', label: 'Type', render: c => label(c.type) },
               { key: 'ts', label: 'When', sort: c => c.ts, render: c => dateTime(c.ts) },
-              { key: 'duration', label: 'Duration', align: 'right', sort: c => c.duration, render: c => duration(c.duration) },
+              { key: 'duration', label: 'Duration', align: 'right', sort: c => c.duration || 0, render: c => duration(c.duration) },
               { key: 'coins', label: 'Coins', align: 'right', sort: c => c.coins, render: c => num(c.coins) },
-              { key: 'status', label: 'Status', render: c => <Status value={c.status} /> },
+              { key: 'status', label: 'Status', render: c => <Status value={c.refunded ? 'refunded' : c.status} /> },
             ]}
-            empty={<Empty title="No calls yet" />}
+            empty={<Empty title={d.callsAvailable ? 'No calls yet' : 'Calls aren’t available yet'} />}
           />
         </Card>
       ) : null}
@@ -283,14 +396,30 @@ export default function UserDetailPage() {
             rows={payments}
             initialSort={{ key: 'ts', dir: 'desc' }}
             columns={[
-              { key: 'id', label: 'Payment', render: t => <span className="a-mono">{t.id}</span> },
+              { key: 'id', label: 'Payment', render: t => <span className="a-mono">{t.gatewayPaymentId || t.gatewayOrderId || t.id}</span> },
               { key: 'ts', label: 'When', sort: t => t.ts, render: t => dateTime(t.ts) },
               { key: 'coins', label: 'Coins', align: 'right', render: t => `${num(t.coins)}${t.bonus ? ` + ${num(t.bonus)}` : ''}` },
               { key: 'amount', label: 'Amount', align: 'right', sort: t => t.amount, render: t => <b className="a-strong">{inr(t.amount)}</b> },
-              { key: 'method', label: 'Method' },
+              { key: 'method', label: 'Method', render: t => (t.method ? label(t.method) : '—') },
               { key: 'status', label: 'Status', render: t => <Status value={t.status} /> },
             ]}
             empty={<Empty title="No payments yet" />}
+          />
+        </Card>
+      ) : null}
+
+      {tab === 'coins' ? (
+        <Card padded={false} subtitle="Last 100 coin movements">
+          <DataTable
+            rows={d.coinTxns}
+            columns={[
+              { key: 'title', label: 'What', render: t => <b className="a-strong">{t.title || label(t.type)}</b> },
+              { key: 'type', label: 'Type', render: t => <Badge>{label(t.type)}</Badge> },
+              { key: 'ts', label: 'When', render: t => dateTime(t.createdAt) },
+              { key: 'coins', label: 'Coins', align: 'right', render: t => <b className={t.coins < 0 ? 'a-danger' : 'a-success'}>{t.coins > 0 ? '+' : ''}{num(t.coins)}</b> },
+              { key: 'balance', label: 'Balance', align: 'right', render: t => num(t.balance) },
+            ]}
+            empty={<Empty title="No coin movements yet" />}
           />
         </Card>
       ) : null}
@@ -300,9 +429,9 @@ export default function UserDetailPage() {
           <DataTable
             rows={reports}
             columns={[
-              { key: 'dir', label: '', render: r => <Badge tone={r.target.id === id ? 'danger' : 'info'}>{r.target.id === id ? 'Against user' : 'Filed by user'}</Badge> },
+              { key: 'dir', label: '', render: r => <Badge tone={r.against ? 'danger' : 'info'}>{r.against ? 'Against user' : 'Filed by user'}</Badge> },
               { key: 'reason', label: 'Reason', render: r => <b className="a-strong">{r.reason}</b> },
-              { key: 'other', label: 'Other party', render: r => (r.target.id === id ? r.reporter.name : r.target.name) },
+              { key: 'other', label: 'Other party', render: r => (r.against ? r.reporterName || String(r.reporter) : r.targetName || `${label(r.targetType)} ${r.targetId}`) },
               { key: 'ts', label: 'When', render: r => ago(r.ts) },
               { key: 'status', label: 'Status', render: r => <Status value={r.status} /> },
             ]}
@@ -313,7 +442,11 @@ export default function UserDetailPage() {
 
       {tab === 'history' ? (
         <Card padded={false}>
-          {history.length === 0 ? (
+          {historyRes.error ? (
+            <ErrorState error={historyRes.error} onRetry={historyRes.reload} />
+          ) : historyRes.data === undefined ? (
+            <Loading />
+          ) : history.length === 0 ? (
             <Empty title="No admin actions yet" />
           ) : (
             history.map(a => (
@@ -336,32 +469,29 @@ export default function UserDetailPage() {
         open={modal === 'coins'}
         user={u}
         onClose={() => setModal(null)}
-        onSave={(delta, reason) => {
-          update('users', u.id, x => ({ coins: x.coins + delta }), [`${delta > 0 ? 'Added' : 'Deducted'} ${num(Math.abs(delta))} coins — ${reason}`, u.id])
-          toast(`${delta > 0 ? 'Added' : 'Deducted'} ${num(Math.abs(delta))} coins`)
-          setModal(null)
+        onSave={async (delta, reason) => {
+          const ok = await run(() => api.post(`/admin/users/${id}/coins`, { delta, reason }), `${delta > 0 ? 'Added' : 'Deducted'} ${num(Math.abs(delta))} coins`)
+          if (ok) setModal(null)
         }}
       />
       <Suspend
         key={modal === 'suspend' ? 's-open' : 's-closed'}
         open={modal === 'suspend'}
         onClose={() => setModal(null)}
-        onSave={(days, reason) => {
-          setStatus('suspended', reason, { suspendedUntil: days ? Date.now() + days * 86400000 : null })
-          setModal(null)
+        onSave={async (days, reason) => {
+          if (await setStatus('suspended', reason, days)) setModal(null)
         }}
       />
       <Confirm
         open={modal === 'ban'}
-        title={`Ban ${u.name}?`}
+        title={`Ban ${u.name || 'this user'}?`}
         message="They’ll be signed out and can’t create a new account with this phone number."
         confirmLabel="Ban user"
         danger
         reason
         onClose={() => setModal(null)}
-        onConfirm={reason => {
-          setStatus('banned', reason)
-          setModal(null)
+        onConfirm={async reason => {
+          if (await setStatus('banned', reason)) setModal(null)
         }}
       />
     </>

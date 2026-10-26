@@ -1,8 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Ban, BadgeCheck, Building2, IndianRupee, Layers, Pencil, PowerOff, RotateCcw, ShieldOff, Star, UserX } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { useApi } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
+import { canAccess } from '../../routes/nav'
 import {
   Avatar,
   Badge,
@@ -11,10 +14,13 @@ import {
   Confirm,
   DataTable,
   Empty,
+  ErrorState,
   Field,
   Input,
+  Loading,
   Modal,
   PageHeader,
+  Pending,
   Seg,
   Select,
   Stat,
@@ -22,7 +28,7 @@ import {
   Tabs,
   Who,
 } from '../../components/ui'
-import { ago, date, dateTime, duration, inr, label, num } from '../../utils/format'
+import { ago, date, dateTime, duration, inr, label, ms, num } from '../../utils/format'
 
 const LEVEL_TONES = ['neutral', 'info', 'violet', 'warning']
 
@@ -32,12 +38,7 @@ const autoLevel = (levels, minutes) =>
 
 const capOf = (levels, level) => levels.find(l => l.level === level)?.maxRate ?? Infinity
 
-/** Highest tier ≤ cap (falls back to the lowest tier). */
-const clampRate = (tiers, value, cap) => {
-  if (value <= cap) return value
-  const ok = tiers.filter(t => t <= cap)
-  return ok.length ? ok[ok.length - 1] : tiers[0]
-}
+const callStatus = s => (s === 'ended' ? 'completed' : s === 'connected' || s === 'ringing' ? 'ongoing' : s)
 
 function RateChips({ tiers, value, cap, onChange }) {
   return (
@@ -92,7 +93,7 @@ function RatesModal({ open, host, tiers, cap, onClose, onSave }) {
 }
 
 function LevelModal({ open, host, levels, onClose, onSave }) {
-  const auto = autoLevel(levels, host.callMinutes)
+  const auto = host.autoLevel ?? autoLevel(levels, host.callMinutes)
   const [value, setValue] = useState(host.levelOverride ? String(host.level) : 'auto')
   const next = value === 'auto' ? auto : Number(value)
   const cap = capOf(levels, next)
@@ -105,7 +106,7 @@ function LevelModal({ open, host, levels, onClose, onSave }) {
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={() => onSave(next, value !== 'auto')}>
+          <Button variant="primary" onClick={() => onSave(value === 'auto' ? null : next)}>
             Save level
           </Button>
         </>
@@ -217,19 +218,8 @@ function EarningsModal({ open, host, onClose, onSave }) {
 
 export default function HostDetailPage() {
   const { id } = useParams()
-  const { db, update } = useStore()
-  const toast = useToast()
-  const [tab, setTab] = useState('overview')
-  const [modal, setModal] = useState(null) // rates | level | agency | earnings | suspend | ban | offline
-  const h = db.hosts.find(x => x.id === id)
-
-  const calls = useMemo(() => db.calls.filter(c => c.hostId === id), [db.calls, id])
-  const lives = useMemo(() => db.lives.filter(l => l.hostId === id), [db.lives, id])
-  const payouts = useMemo(() => db.withdrawals.filter(w => w.hostId === id), [db.withdrawals, id])
-  const reports = useMemo(() => db.reports.filter(r => r.target.id === id), [db.reports, id])
-  const history = useMemo(() => db.audit.filter(a => String(a.target).includes(id)), [db.audit, id])
-
-  if (!h) {
+  const res = useApi(`/admin/hosts/${id}`)
+  if (res.error?.status === 404 || res.error?.status === 400) {
     return (
       <>
         <PageHeader crumbs={[{ label: 'Hosts', to: '/admin/hosts' }, { label: 'Not found' }]} title="Host not found" />
@@ -244,21 +234,45 @@ export default function HostDetailPage() {
       </>
     )
   }
+  return <Pending res={res}>{d => <HostDetail d={d} reload={res.reload} />}</Pending>
+}
+
+function HostDetail({ d, reload }) {
+  const { db, me } = useStore()
+  const toast = useToast()
+  const [tab, setTab] = useState('overview')
+  const [modal, setModal] = useState(null) // rates | level | agency | earnings | suspend | ban | offline
+  const h = d.host
+  const id = h.id
+  const canAudit = canAccess(me.role, 'audit')
+  const historyRes = useApi(canAudit && tab === 'history' ? '/admin/audit' : null, { target: id, limit: 50 })
+  const history = historyRes.data?.items || []
+  const agenciesRes = useApi(modal === 'agency' && canAccess(me.role, 'agencies') ? '/admin/agencies' : null, { limit: 100 })
+
+  const calls = d.calls.map(c => ({ ...c, status: callStatus(c.status), ts: c.connectedAt || c.createdAt, coins: c.chargedCoins || 0, hostNet: c.hostNet || 0 }))
+  const lives = d.lives.map(l => ({ ...l, startedAt: l.startedAt || l.createdAt }))
+  const payouts = d.withdrawals.map(w => ({ ...w, ts: w.createdAt }))
+  const reports = d.reports.map(r => ({ ...r, ts: r.createdAt, reporter: { id: String(r.reporter), name: r.reporterName || 'User', avatar: null } }))
 
   const levels = db.config.hostLevels
   const cap = capOf(levels, h.level)
-  const agency = h.agencyId ? db.agencies.find(a => a.id === h.agencyId) : null
+  const agency = d.agency
   const close = () => setModal(null)
 
-  const setStatus = (status, reason) => {
-    update(
-      'hosts',
-      h.id,
-      status === 'active' ? { status, statusReason: '' } : { status, statusReason: reason || '', online: false },
-      [`${status === 'active' ? 'Reactivated' : status === 'banned' ? 'Banned' : 'Suspended'} host${reason ? ` — ${reason}` : ''}`, h.id],
-    )
-    toast(`${h.name} is now ${status}`)
+  // Run an API action; toast, refetch, close the modal on success.
+  const run = async (fn, ok) => {
+    try {
+      await fn()
+      toast(ok)
+      close()
+      reload()
+    } catch (e) {
+      toast(errorText(e), 'error')
+    }
   }
+
+  const setStatus = (status, reason) =>
+    run(() => api.post(`/admin/hosts/${id}/status`, { status, reason: reason || undefined }), `${h.name} is now ${status}`)
 
   const paidOut = payouts.filter(w => w.status === 'paid').reduce((n, w) => n + w.net, 0)
   const callNet = calls.reduce((n, c) => n + (c.hostNet || 0), 0)
@@ -325,9 +339,10 @@ export default function HostDetailPage() {
       <div className="a-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', marginBottom: 20 }}>
         <Stat label="Lifetime earned" value={inr(h.lifetime)} sub="net of commission" />
         <Stat label="Available" value={inr(h.available)} icon={IndianRupee} sub={`${inr(paidOut)} paid out`} />
-        <Stat label="Call minutes" value={num(h.callMinutes)} sub={`${num(calls.length)} calls in sample`} />
-        <Stat label="Rating" value={Number(h.rating).toFixed(1)} icon={Star} sub={`${num(h.followers)} followers`} />
-        <Stat label="Answer rate" value={`${h.answerRate}%`} sub={h.answerRate < 70 ? 'Below 70% — check' : 'of incoming calls'} />
+        <Stat label="Call minutes" value={num(h.callMinutes)} sub={`${num(calls.length)} recent calls`} />
+        <Stat label="Rating" value={Number(h.rating || 0).toFixed(1)} icon={Star} sub={`${num(h.ratingCount)} ratings`} />
+        {/* TODO(api): answer rate and followers aren't returned by GET /admin/hosts/:id; showing last-30-day earnings instead. */}
+        <Stat label="Last 30 days" value={inr(d.earnings.last30)} sub={d.balance.onHold ? `${inr(d.balance.onHold)} on hold` : 'net earnings'} />
       </div>
 
       <Tabs
@@ -339,7 +354,7 @@ export default function HostDetailPage() {
           { value: 'lives', label: 'Lives', count: lives.length },
           { value: 'payouts', label: 'Payouts', count: payouts.length },
           { value: 'reports', label: 'Reports', count: reports.length },
-          { value: 'history', label: 'Admin history' },
+          ...(canAudit ? [{ value: 'history', label: 'Admin history' }] : []),
         ]}
       />
 
@@ -352,10 +367,10 @@ export default function HostDetailPage() {
                 <dd>{h.phone}</dd>
                 <dt>Gender · age</dt>
                 <dd>
-                  {h.gender} · {h.age}
+                  {h.gender || '—'} · {h.age ?? '—'}
                 </dd>
                 <dt>City</dt>
-                <dd>{h.city}</dd>
+                <dd>{h.city || '—'}</dd>
                 <dt>Languages</dt>
                 <dd>{(h.languages || []).join(', ') || '—'}</dd>
                 <dt>Bio</dt>
@@ -364,10 +379,8 @@ export default function HostDetailPage() {
                 <dd>
                   {date(h.joined)} <span className="a-muted">· {ago(h.joined)}</span>
                 </dd>
-                <dt>ID</dt>
-                <dd>
-                  {h.idType} <span className="a-mono">••{h.idLast4}</span>
-                </dd>
+                <dt>Payout</dt>
+                <dd>{d.payoutMethods.map(m => m.label).join(', ') || '—'}</dd>
                 <dt>Verified</dt>
                 <dd>{h.verified ? <Badge tone="success">Verified</Badge> : <Badge tone="warning">Not verified</Badge>}</dd>
               </dl>
@@ -427,9 +440,9 @@ export default function HostDetailPage() {
                   <dt>Code</dt>
                   <dd className="a-mono">{agency.code}</dd>
                   <dt>Owner</dt>
-                  <dd>{agency.owner}</dd>
+                  <dd>{agency.owner || '—'}</dd>
                   <dt>Contact</dt>
-                  <dd>{agency.phone}</dd>
+                  <dd>{agency.phone || '—'}</dd>
                   <dt>Agency cut</dt>
                   <dd>{agency.cut}%</dd>
                 </dl>
@@ -447,10 +460,10 @@ export default function HostDetailPage() {
             rows={calls}
             initialSort={{ key: 'ts', dir: 'desc' }}
             columns={[
-              { key: 'user', label: 'User', render: c => <Who src={c.userAvatar} name={c.userName} sub={c.id} to={`/admin/users/${c.userId}`} /> },
+              { key: 'user', label: 'User', render: c => <Who src={c.user?.avatar} name={c.user?.name || 'User'} sub={c.id} to={canAccess(me.role, 'users') ? `/admin/users/${c.user?.id}` : undefined} /> },
               { key: 'type', label: 'Type', render: c => label(c.type) },
               { key: 'ts', label: 'When', sort: c => c.ts, render: c => <span className="a-nowrap">{dateTime(c.ts)}</span> },
-              { key: 'duration', label: 'Duration', align: 'right', sort: c => c.duration, render: c => duration(c.duration) },
+              { key: 'duration', label: 'Duration', align: 'right', sort: c => c.duration || 0, render: c => duration(c.duration) },
               { key: 'rate', label: 'Rate', align: 'right', render: c => `${c.rate}/min` },
               { key: 'coins', label: 'Coins', align: 'right', sort: c => c.coins, render: c => num(c.coins) },
               { key: 'hostNet', label: 'Host net', align: 'right', sort: c => c.hostNet, render: c => <b className="a-strong">{inr(c.hostNet)}</b> },
@@ -459,7 +472,7 @@ export default function HostDetailPage() {
                 label: 'Status',
                 render: c => (
                   <span className="a-row" style={{ gap: 6 }}>
-                    <Status value={c.status} />
+                    <Status value={c.refunded ? 'refunded' : c.status} />
                     {c.flagged ? <Badge tone="warning">Flagged</Badge> : null}
                   </span>
                 ),
@@ -481,9 +494,9 @@ export default function HostDetailPage() {
                 label: 'Stream',
                 render: l => (
                   <span className="a-row">
-                    <img src={l.cover} alt="" className="a-thumb" style={{ width: 44, height: 44 }} loading="lazy" />
+                    {l.cover ? <img src={l.cover} alt="" className="a-thumb" style={{ width: 44, height: 44 }} loading="lazy" /> : null}
                     <span>
-                      <b className="a-strong">{l.title}</b>
+                      <b className="a-strong">{l.title || 'Untitled'}</b>
                       <span className="a-small a-muted" style={{ display: 'block' }}>
                         {l.id}
                       </span>
@@ -493,7 +506,7 @@ export default function HostDetailPage() {
               },
               { key: 'mode', label: 'Mode', render: l => <Badge tone={l.mode === 'premium' ? 'violet' : 'neutral'}>{label(l.mode)}{l.ticket ? ` · ${l.ticket} coins` : ''}</Badge> },
               { key: 'startedAt', label: 'Started', sort: l => l.startedAt, render: l => <span className="a-nowrap">{dateTime(l.startedAt)}</span> },
-              { key: 'length', label: 'Length', align: 'right', render: l => (l.endedAt ? duration((l.endedAt - l.startedAt) / 1000) : <span className="a-muted">ongoing</span>) },
+              { key: 'length', label: 'Length', align: 'right', render: l => (l.endedAt ? duration((ms(l.endedAt) - ms(l.startedAt)) / 1000) : <span className="a-muted">ongoing</span>) },
               { key: 'peak', label: 'Peak viewers', align: 'right', sort: l => l.peak, render: l => num(l.peak) },
               { key: 'diamonds', label: 'Diamonds', align: 'right', sort: l => l.diamonds, render: l => num(l.diamonds) },
               { key: 'status', label: 'Status', render: l => <Status value={l.status} /> },
@@ -509,7 +522,7 @@ export default function HostDetailPage() {
             rows={payouts}
             initialSort={{ key: 'ts', dir: 'desc' }}
             columns={[
-              { key: 'id', label: 'Request', render: w => <span className="a-mono">{w.id}</span> },
+              { key: 'id', label: 'Request', render: w => <span className="a-mono">{w.id.slice(-8)}</span> },
               { key: 'ts', label: 'Requested', sort: w => w.ts, render: w => <span className="a-nowrap">{dateTime(w.ts)}</span> },
               { key: 'amount', label: 'Amount', align: 'right', sort: w => w.amount, render: w => inr(w.amount) },
               { key: 'fee', label: 'Fee', align: 'right', render: w => <span className="a-muted">{inr(w.fee)}</span> },
@@ -548,7 +561,7 @@ export default function HostDetailPage() {
                   </span>
                 ),
               },
-              { key: 'reporter', label: 'Reported by', render: r => <Who src={r.reporter.avatar} name={r.reporter.name} sub={r.reporter.id} size={30} to={`/admin/users/${r.reporter.id}`} /> },
+              { key: 'reporter', label: 'Reported by', render: r => <Who src={r.reporter.avatar} name={r.reporter.name} sub={r.reporter.id} size={30} to={canAccess(me.role, 'users') ? `/admin/users/${r.reporter.id}` : undefined} /> },
               { key: 'ts', label: 'When', sort: r => r.ts, render: r => <span className="a-nowrap">{ago(r.ts)}</span> },
               { key: 'priority', label: 'Priority', render: r => <Status value={r.priority} /> },
               {
@@ -569,7 +582,11 @@ export default function HostDetailPage() {
 
       {tab === 'history' ? (
         <Card padded={false}>
-          {history.length === 0 ? (
+          {historyRes.error ? (
+            <ErrorState error={historyRes.error} onRetry={historyRes.reload} />
+          ) : historyRes.data === undefined ? (
+            <Loading />
+          ) : history.length === 0 ? (
             <Empty title="No admin actions yet" />
           ) : (
             history.map(a => (
@@ -594,11 +611,7 @@ export default function HostDetailPage() {
         tiers={db.config.rateTiers}
         cap={cap}
         onClose={close}
-        onSave={rates => {
-          update('hosts', h.id, { rates }, [`Changed call prices to video ${rates.video} / voice ${rates.voice} coins/min (was ${h.rates.video} / ${h.rates.voice})`, h.id])
-          toast('Call prices updated')
-          close()
-        }}
+        onSave={rates => run(() => api.patch(`/admin/hosts/${id}`, { rates }), 'Call prices updated')}
       />
       <LevelModal
         key={modal === 'level' ? 'l-open' : 'l-closed'}
@@ -606,31 +619,19 @@ export default function HostDetailPage() {
         host={h}
         levels={levels}
         onClose={close}
-        onSave={(level, override) => {
-          const c = capOf(levels, level)
-          const rates = {
-            video: clampRate(db.config.rateTiers.video, h.rates.video, c),
-            voice: clampRate(db.config.rateTiers.voice, h.rates.voice, c),
-          }
-          update('hosts', h.id, { level, levelOverride: override, rates }, [
-            `${override ? 'Set level override' : 'Reset level to automatic'}: level ${h.level} → ${level}`,
-            h.id,
-          ])
-          toast(`Level set to ${level}`)
-          close()
-        }}
+        onSave={levelOverride =>
+          run(() => api.patch(`/admin/hosts/${id}`, { levelOverride }), levelOverride ? `Level set to ${levelOverride}` : 'Level set to automatic')
+        }
       />
       <AgencyModal
-        key={modal === 'agency' ? 'a-open' : 'a-closed'}
+        key={modal === 'agency' ? `a-open-${agenciesRes.data ? 1 : 0}` : 'a-closed'}
         open={modal === 'agency'}
         host={h}
-        agencies={db.agencies}
+        agencies={agenciesRes.data?.items || (agency ? [agency] : [])}
         onClose={close}
         onSave={agencyId => {
-          const to = db.agencies.find(a => a.id === agencyId)
-          update('hosts', h.id, { agencyId }, [to ? `Moved host to agency ${to.name} (${to.code})` : 'Made host independent', h.id])
-          toast(to ? `Moved to ${to.name}` : 'Host is now independent')
-          close()
+          const to = agenciesRes.data?.items.find(a => a.id === agencyId)
+          run(() => api.patch(`/admin/hosts/${id}`, { agencyId }), to ? `Moved to ${to.name}` : 'Host is now independent')
         }}
       />
       <EarningsModal
@@ -638,14 +639,9 @@ export default function HostDetailPage() {
         open={modal === 'earnings'}
         host={h}
         onClose={close}
-        onSave={(delta, reason) => {
-          update('hosts', h.id, x => ({ available: Math.round((x.available + delta) * 100) / 100 }), [
-            `${delta > 0 ? 'Credited' : 'Debited'} ${inr(Math.abs(delta))} ${delta > 0 ? 'to' : 'from'} available earnings — ${reason}`,
-            h.id,
-          ])
-          toast(`${delta > 0 ? 'Credited' : 'Debited'} ${inr(Math.abs(delta))}`)
-          close()
-        }}
+        onSave={(delta, reason) =>
+          run(() => api.post(`/admin/hosts/${id}/earnings`, { amount: delta, reason }), `${delta > 0 ? 'Credited' : 'Debited'} ${inr(Math.abs(delta))}`)
+        }
       />
       <Confirm
         open={modal === 'offline'}
@@ -653,11 +649,7 @@ export default function HostDetailPage() {
         message="Any ringing calls are cancelled and the host disappears from For You until they go online again."
         confirmLabel="Force offline"
         onClose={close}
-        onConfirm={() => {
-          update('hosts', h.id, { online: false }, ['Forced host offline', h.id])
-          toast(`${h.name} is now offline`)
-          close()
-        }}
+        onConfirm={() => run(() => api.post(`/admin/hosts/${id}/force-offline`), `${h.name} is now offline`)}
       />
       <Confirm
         open={modal === 'suspend'}
@@ -668,10 +660,7 @@ export default function HostDetailPage() {
         reason
         reasonLabel="Reason (shown to the host)"
         onClose={close}
-        onConfirm={reason => {
-          setStatus('suspended', reason)
-          close()
-        }}
+        onConfirm={reason => setStatus('suspended', reason)}
       />
       <Confirm
         open={modal === 'ban'}
@@ -682,10 +671,7 @@ export default function HostDetailPage() {
         reason
         reasonLabel="Reason (shown to the host)"
         onClose={close}
-        onConfirm={reason => {
-          setStatus('banned', reason)
-          close()
-        }}
+        onConfirm={reason => setStatus('banned', reason)}
       />
       <Confirm
         open={modal === 'reactivate'}
@@ -695,10 +681,7 @@ export default function HostDetailPage() {
         reason
         reasonLabel="Reason (for the audit log)"
         onClose={close}
-        onConfirm={reason => {
-          setStatus('active', reason)
-          close()
-        }}
+        onConfirm={reason => setStatus('active', reason)}
       />
     </>
   )

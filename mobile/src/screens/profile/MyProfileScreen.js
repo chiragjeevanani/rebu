@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useCallback } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import { Image, Pressable, StyleSheet, View } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import {
@@ -51,8 +52,22 @@ export default function MyProfileScreen({ navigation }) {
     vipLevel,
     nobility,
     equipped,
+    config,
+    refreshMe,
+    refreshStore,
+    refreshUnread,
+    unread,
   } = useApp();
-  const frame = STORE_ITEMS.find(i => i.id === equipped.frame);
+  const items = config?.storeItems?.length ? config.storeItems : STORE_ITEMS;
+  const frame = items.find(i => i.id === equipped.frame);
+  // Follower counts, VIP and items change elsewhere; refresh when shown.
+  useFocusEffect(
+    useCallback(() => {
+      refreshMe().catch(() => {});
+      refreshStore();
+      refreshUnread();
+    }, [refreshMe, refreshStore, refreshUnread]),
+  );
 
   return (
     <Screen scroll>
@@ -99,7 +114,7 @@ export default function MyProfileScreen({ navigation }) {
       <View style={styles.stats}>
         {[
           ['Following', following.length, 'following'],
-          ['Friends', greeted.length + user.friends, 'followers'],
+          ['Friends', greeted.length, 'following'],
           ['Followers', user.followers, 'followers'],
         ].map(([label, n, tab]) => (
           <Pressable
@@ -275,6 +290,7 @@ export default function MyProfileScreen({ navigation }) {
         <ListRow
           icon={Bell}
           title="Notifications"
+          subtitle={unread ? `${unread} unread` : null}
           onPress={() => navigation.navigate('Notifications')}
         />
         <ListRow

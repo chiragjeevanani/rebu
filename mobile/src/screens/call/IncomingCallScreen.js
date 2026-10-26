@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -10,6 +10,8 @@ import Txt from '../../components/Txt';
 import Avatar from '../../components/Avatar';
 import IconButton from '../../components/IconButton';
 import { useSecureScreen } from '../../utils/secure';
+import { post } from '../../api/client';
+import { useSocketEvent } from '../../api/socket';
 
 // How long the host's phone rings before it counts as a missed call.
 const RING_TIMEOUT = 30000;
@@ -17,36 +19,54 @@ const RING_TIMEOUT = 30000;
 export default function IncomingCallScreen({ navigation, route }) {
   useSecureScreen();
   const { caller } = route.params;
-  const { addCall, hostRates, hostAgency } = useApp();
+  const { hostRates, hostAgency } = useApp();
   const insets = useSafeAreaInsets();
   const type = caller.video ? 'video' : 'voice';
   const earnRate = netPerMinute(hostRates[type], type, hostAgency);
 
-  const decline = (status = 'declined') => {
-    addCall({
-      name: caller.name,
-      photo: caller.photo,
-      type,
-      dir: 'missed',
-      status,
-      duration: null,
-      coins: 0,
-    });
+  const callId = caller.call?.id;
+  const [, setBusy] = useState(false);
+
+  // The caller hung up or the server's ring timeout fired.
+  useSocketEvent('call:ended', p => {
+    if (p?.callId === callId) navigation.goBack();
+  });
+
+  const decline = () => {
+    if (callId) post(`/calls/${callId}/decline`).catch(() => {});
     navigation.goBack();
   };
 
+  // Backstop only: the server's ring timeout ends the call (as missed) first.
   useEffect(() => {
-    const t = setTimeout(() => decline('no_answer'), RING_TIMEOUT);
+    const t = setTimeout(() => navigation.goBack(), RING_TIMEOUT + 5000);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const accept = () =>
-    navigation.replace('Call', {
-      user: caller,
-      video: caller.video,
-      incoming: true,
-    });
+  const accept = async () => {
+    if (!callId) {
+      navigation.replace('Call', {
+        user: caller,
+        video: caller.video,
+        incoming: true,
+      });
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await post(`/calls/${callId}/accept`);
+      navigation.replace('Call', {
+        user: caller,
+        video: caller.video,
+        incoming: true,
+        call: r.call,
+        agora: r.agora,
+      });
+    } catch {
+      navigation.goBack();
+    }
+  };
 
   return (
     <LinearGradient

@@ -3,7 +3,7 @@ import { Image, Pressable, StyleSheet, View } from 'react-native';
 import { ImagePlus, X } from 'lucide-react-native';
 import { colors, radius, spacing } from '../../theme';
 import { TOPICS } from '../../data/social';
-import { useApp } from '../../context/AppContext';
+import { post as apiPost, uploadImage } from '../../api/client';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
 import Txt from '../../components/Txt';
@@ -13,26 +13,30 @@ import Button from '../../components/Button';
 import PhotoSourceSheet from '../../components/PhotoSourceSheet';
 
 export default function CreateMomentScreen({ navigation }) {
-  const { user, addMoment } = useApp();
   const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const [photo, setPhoto] = useState(null);
   const [topic, setTopic] = useState(null);
   const [picker, setPicker] = useState(false);
   const canPost = text.trim() || photo;
 
-  const post = () => {
-    addMoment({
-      id: `my${Date.now()}`,
-      author: { name: 'You', photo: user.photos[0] },
-      type: photo ? 'photo' : 'text',
-      media: photo,
-      topic,
-      text: text.trim(),
-      time: 'Just now',
-      likes: 0,
-      comments: 0,
-    });
-    navigation.goBack();
+  const post = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const url = photo ? await uploadImage(photo) : null;
+      await apiPost('/moments', {
+        text: text.trim(),
+        topic: topic || 'new',
+        photos: url ? [url] : [],
+      });
+      navigation.goBack();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -41,7 +45,17 @@ export default function CreateMomentScreen({ navigation }) {
       edges={['top', 'bottom']}
       footer={
         <View style={styles.footer}>
-          <Button title="Post moment" disabled={!canPost} onPress={post} />
+          {error ? (
+            <Txt variant="small" color={colors.danger} style={styles.error}>
+              {error}
+            </Txt>
+          ) : null}
+          <Button
+            title="Post moment"
+            disabled={!canPost || busy}
+            loading={busy}
+            onPress={post}
+          />
         </View>
       }
     >
@@ -103,6 +117,7 @@ export default function CreateMomentScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
+  error: { marginBottom: 8 },
   body: { paddingHorizontal: spacing.md },
   label: { marginTop: 20, marginBottom: 10 },
   photo: {

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Image, StyleSheet, View } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
+import { User } from 'lucide-react-native';
 import { colors } from '../theme';
 
 export default function Avatar({
@@ -11,6 +12,7 @@ export default function Avatar({
   style,
 }) {
   const pad = ring ? 2.5 : 0;
+  const inner = size - pad * 2 - (ring ? 4 : 0);
   const img = (
     <View
       style={{
@@ -19,15 +21,27 @@ export default function Avatar({
         borderRadius: size,
       }}
     >
-      <Image
-        source={{ uri }}
-        style={{
-          width: size - pad * 2 - (ring ? 4 : 0),
-          height: size - pad * 2 - (ring ? 4 : 0),
-          borderRadius: size,
-          backgroundColor: colors.surfaceMuted,
-        }}
-      />
+      {uri ? (
+        <Image
+          source={{ uri }}
+          style={{
+            width: inner,
+            height: inner,
+            borderRadius: size,
+            backgroundColor: colors.surfaceMuted,
+          }}
+        />
+      ) : (
+        // No photo yet: a plain person glyph instead of an empty circle.
+        <View
+          style={[
+            styles.empty,
+            { width: inner, height: inner, borderRadius: size },
+          ]}
+        >
+          <User size={inner * 0.5} color={colors.textFaint} />
+        </View>
+      )}
     </View>
   );
   return (
@@ -69,6 +83,11 @@ export default function Avatar({
 }
 
 const styles = StyleSheet.create({
+  empty: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceMuted,
+  },
   dotWrap: {
     position: 'absolute',
     alignItems: 'center',

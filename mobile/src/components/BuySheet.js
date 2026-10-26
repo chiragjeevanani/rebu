@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { colors, fonts } from '../theme';
 import { useApp } from '../context/AppContext';
@@ -10,24 +10,31 @@ import { CoinIcon } from './CoinPill';
 
 /**
  * Confirms a coin purchase. item = { title, emoji, price, note }.
- * Spends coins, records the transaction, then calls onBought().
+ * onBuy() makes the purchase on the server and resolves with the new state
+ * (it should include `balance`); the sheet shows progress and errors.
  */
-export default function BuySheet({ item, onClose, onBought, onRecharge }) {
-  const { coins, spendCoins, addTransaction } = useApp();
+export default function BuySheet({ item, onClose, onBuy, onRecharge }) {
+  const { coins, setCoinsFromServer } = useApp();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => setError(''), [item]);
   if (!item) return <Sheet visible={false} onClose={onClose} />;
   const enough = coins >= item.price;
 
-  const buy = () => {
+  const buy = async () => {
     if (!enough) return onRecharge?.();
-    spendCoins(item.price);
-    addTransaction({
-      type: 'purchase',
-      title: item.title,
-      sub: 'Purchase',
-      amount: -item.price,
-    });
-    onBought?.();
-    onClose();
+    setBusy(true);
+    setError('');
+    try {
+      const r = await onBuy();
+      if (typeof r?.balance === 'number') setCoinsFromServer(r.balance);
+      onClose();
+    } catch (e) {
+      if (e.code === 'insufficient_coins') onRecharge?.();
+      else setError(e.message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -49,9 +56,16 @@ export default function BuySheet({ item, onClose, onBought, onRecharge }) {
         <Txt variant="small" center>
           Your balance: {num(coins)} coins
         </Txt>
+        {error ? (
+          <Txt variant="small" center color={colors.danger} style={styles.note}>
+            {error}
+          </Txt>
+        ) : null}
         <Button
           title={enough ? 'Confirm purchase' : 'Not enough coins · Recharge'}
           onPress={buy}
+          loading={busy}
+          disabled={busy}
           style={styles.cta}
         />
       </View>

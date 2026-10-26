@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react'
-import { CalendarDays, Eye, EyeOff, Megaphone, MousePointerClick, Pencil, Plus, Trash2 } from 'lucide-react'
-import { useStore } from '../../hooks/useStore'
+import { useRef, useState } from 'react'
+import { CalendarDays, Eye, EyeOff, Megaphone, MousePointerClick, Pencil, Plus, Trash2, Upload } from 'lucide-react'
+import { useApi } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
 import { useToast } from '../../hooks/useToast'
-import { Badge, Button, Card, Confirm, Empty, Field, Input, Modal, PageHeader, Select, Status, Tabs } from '../../components/ui'
-import { compact, date, label, num, pct } from '../../utils/format'
+import { Badge, Button, Card, Confirm, Empty, ErrorState, Field, Input, Loading, Modal, PageHeader, Select, Status, Tabs } from '../../components/ui'
+import { compact, date, label, ms, num, pct } from '../../utils/format'
 
 const DAY = 86400000
 // Read the clock in handlers only; render uses the time captured on mount.
@@ -12,12 +13,14 @@ const PLACEMENTS = ['Home', 'Events', 'Coins tab', 'Splash']
 const PLACEMENT_TONE = { Home: 'brand', Events: 'violet', 'Coins tab': 'warning', Splash: 'info' }
 const SWATCHES = ['#D81B60', '#F5B301', '#1E9E5A', '#2F6FDE', '#5B2A86', '#E89A00', '#1C1C1E']
 const STATUSES = ['live', 'scheduled', 'draft', 'ended']
+const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp']
+const MAX_IMAGE = 8 * 1024 * 1024
 
 // Drafts stay drafts; everything else follows its date window.
 const statusOf = (b, now) => {
   if (b.status === 'draft') return 'draft'
-  if (now < b.startsAt) return 'scheduled'
-  if (now > b.endsAt) return 'ended'
+  if (now < ms(b.startsAt)) return 'scheduled'
+  if (now > ms(b.endsAt)) return 'ended'
   return 'live'
 }
 
@@ -75,7 +78,16 @@ function BannerForm({ open, banner, onClose, onSave }) {
   const [now] = useState(clock)
   const [f, setF] = useState(() =>
     banner
-      ? { ...banner, start: toDay(banner.startsAt), end: toDay(banner.endsAt) }
+      ? {
+          ...banner,
+          subtitle: banner.subtitle || '',
+          image: banner.image || '',
+          cta: banner.cta || '',
+          link: banner.link || '',
+          color: banner.color || SWATCHES[0],
+          start: toDay(banner.startsAt),
+          end: toDay(banner.endsAt),
+        }
       : {
           title: '',
           subtitle: '',
@@ -89,6 +101,26 @@ function BannerForm({ open, banner, onClose, onSave }) {
         },
   )
   const set = patch => setF(x => ({ ...x, ...patch }))
+  const toast = useToast()
+  const fileRef = useRef(null)
+  const [uploading, setUploading] = useState(false)
+
+  // POST /admin/uploads takes the raw image and returns its public URL.
+  const upload = async file => {
+    if (!file) return
+    if (!IMAGE_TYPES.includes(file.type)) return toast('Use a JPEG, PNG or WebP image.', 'error')
+    if (file.size > MAX_IMAGE) return toast('Images can be up to 8 MB.', 'error')
+    setUploading(true)
+    try {
+      const { url } = await api.upload('/admin/uploads', file)
+      set({ image: url })
+      toast('Image uploaded')
+    } catch (e) {
+      toast(errorText(e), 'error')
+    } finally {
+      setUploading(false)
+    }
+  }
 
   const errors = {
     title: !f.title.trim() ? 'Title is required' : null,
@@ -145,7 +177,27 @@ function BannerForm({ open, banner, onClose, onSave }) {
           </Field>
         </div>
         <Field label="Image URL" hint="1200 × 500 recommended. Leave empty to use the solid colour." error={errors.image}>
-          <Input value={f.image} onChange={e => set({ image: e.target.value })} placeholder="https://…" />
+          <div className="a-row" style={{ gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <Input value={f.image} onChange={e => set({ image: e.target.value })} placeholder="https://…" />
+            </div>
+            <Button icon={Upload} disabled={uploading} onClick={e => {
+              e.preventDefault()
+              fileRef.current?.click()
+            }}>
+              {uploading ? 'Uploading…' : 'Upload image'}
+            </Button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept={IMAGE_TYPES.join(',')}
+              hidden
+              onChange={e => {
+                upload(e.target.files?.[0])
+                e.target.value = ''
+              }}
+            />
+          </div>
         </Field>
         <div className="a-grid c2">
           <Field label="Button text">
@@ -249,42 +301,42 @@ function BannerCard({ b, status, onEdit, onToggle, onDelete }) {
 }
 
 export default function BannersPage() {
-  const { db, update, create, remove, log } = useStore()
   const toast = useToast()
-  const [now] = useState(clock)
   const [tab, setTab] = useState('live')
   const [editing, setEditing] = useState(null) // banner | 'new' | null
   const [deleting, setDeleting] = useState(null)
+  const res = useApi('/admin/content/banners', { status: tab, limit: 100 })
+  const counts = res.data?.counts || {}
+  const view = res.data?.items || []
 
-  const withStatus = useMemo(() => db.banners.map(b => ({ b, status: statusOf(b, now) })), [db.banners, now])
-  const counts = useMemo(
-    () => Object.fromEntries(STATUSES.map(s => [s, withStatus.filter(x => x.status === s).length])),
-    [withStatus],
-  )
-  const view = withStatus.filter(x => x.status === tab).sort((x, y) => y.b.startsAt - x.b.startsAt)
+  const fail = e => toast(errorText(e), 'error')
 
-  const save = ({ draft, ...data }) => {
-    const status = draft ? 'draft' : statusOf({ ...data, status: 'x' }, clock())
-    if (editing && editing !== 'new') {
-      update('banners', editing.id, { ...data, status }, [`Updated banner “${data.title}”${draft ? ' (draft)' : ''}`, editing.id])
-      toast('Banner saved')
-    } else {
-      const b = create('banners', { ...data, status, clicks: 0, impressions: 0 })
-      log(`${draft ? 'Created draft banner' : 'Published banner'} “${data.title}”`, b.id)
-      toast(draft ? 'Draft saved' : `Banner ${status === 'live' ? 'is live' : 'scheduled'}`)
+  const save = async ({ draft, ...data }) => {
+    try {
+      const out =
+        editing && editing !== 'new'
+          ? await api.patch(`/admin/content/banners/${editing.id}`, { ...data, draft })
+          : await api.post('/admin/content/banners', { ...data, draft })
+      const status = out.banner.status
+      toast(editing !== 'new' ? 'Banner saved' : draft ? 'Draft saved' : `Banner ${status === 'live' ? 'is live' : status === 'ended' ? 'saved (already ended)' : 'scheduled'}`)
+      setEditing(null)
+      if (status === tab) res.reload()
+      else setTab(status)
+    } catch (e) {
+      fail(e)
     }
-    setTab(status)
-    setEditing(null)
   }
 
-  const toggle = (b, status) => {
-    if (status === 'draft') {
-      const next = statusOf({ ...b, status: 'x' }, clock())
-      update('banners', b.id, { status: next }, ['Published banner', b.id])
-      toast(next === 'ended' ? 'Published, but its end date has passed. Edit the dates to show it.' : `Banner ${next === 'live' ? 'is live' : 'scheduled'}`)
-    } else {
-      update('banners', b.id, { status: 'draft' }, ['Unpublished banner', b.id])
-      toast('Banner moved to drafts')
+  const toggle = async b => {
+    try {
+      const { banner } = await api.patch(`/admin/content/banners/${b.id}`, { draft: b.status !== 'draft' })
+      if (b.status === 'draft') {
+        const next = banner.status
+        toast(next === 'ended' ? 'Published, but its end date has passed. Edit the dates to show it.' : `Banner ${next === 'live' ? 'is live' : 'scheduled'}`)
+      } else toast('Banner moved to drafts')
+      res.reload()
+    } catch (e) {
+      fail(e)
     }
   }
 
@@ -306,7 +358,15 @@ export default function BannersPage() {
         tabs={STATUSES.map(s => ({ value: s, label: label(s), count: counts[s] }))}
       />
 
-      {view.length === 0 ? (
+      {res.error && !res.data ? (
+        <Card>
+          <ErrorState error={res.error} onRetry={res.reload} />
+        </Card>
+      ) : !res.data ? (
+        <Card>
+          <Loading />
+        </Card>
+      ) : view.length === 0 ? (
         <Card>
           <Empty
             icon={Megaphone}
@@ -315,14 +375,14 @@ export default function BannersPage() {
           />
         </Card>
       ) : (
-        <div className="a-grid c3">
-          {view.map(({ b, status }) => (
+        <div className="a-grid c3" style={res.loading ? { opacity: 0.55 } : undefined}>
+          {view.map(b => (
             <BannerCard
               key={b.id}
               b={b}
-              status={status}
+              status={b.status}
               onEdit={() => setEditing(b)}
-              onToggle={() => toggle(b, status)}
+              onToggle={() => toggle(b)}
               onDelete={() => setDeleting(b)}
             />
           ))}
@@ -346,10 +406,15 @@ export default function BannersPage() {
         confirmLabel="Delete banner"
         danger
         onClose={() => setDeleting(null)}
-        onConfirm={() => {
-          remove('banners', deleting.id, [`Deleted banner “${deleting.title}”`, deleting.id])
-          toast('Banner deleted')
-          setDeleting(null)
+        onConfirm={async () => {
+          try {
+            await api.del(`/admin/content/banners/${deleting.id}`)
+            toast('Banner deleted')
+            setDeleting(null)
+            res.reload()
+          } catch (e) {
+            fail(e)
+          }
         }}
       />
     </>

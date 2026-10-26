@@ -4,15 +4,14 @@ import LinearGradient from 'react-native-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { X } from 'lucide-react-native';
 import { colors, fonts } from '../../theme';
-import { HOSTS } from '../../data/mock';
+import { post } from '../../api/client';
+import { toAppHost, useHosts } from '../../api/hosts';
 import { useApp } from '../../context/AppContext';
 import Txt from '../../components/Txt';
 import IconButton from '../../components/IconButton';
 import Chip from '../../components/Chip';
 import { CoinIcon } from '../../components/CoinPill';
 import { useSecureScreen } from '../../utils/secure';
-
-const ORBIT = HOSTS.slice(0, 6);
 
 export default function RandomCallScreen({ navigation, route }) {
   useSecureScreen();
@@ -22,6 +21,9 @@ export default function RandomCallScreen({ navigation, route }) {
   const spin = useRef(new Animated.Value(0)).current;
   const language = route.params?.language || 'Any';
   const [status, setStatus] = useState('Searching for someone…');
+  const hosts = useHosts();
+  const orbit = hosts.filter(h => h.online).slice(0, 6);
+  const ORBIT = orbit.length ? orbit : hosts.slice(0, 6);
 
   useEffect(() => {
     const loop = Animated.loop(
@@ -33,15 +35,49 @@ export default function RandomCallScreen({ navigation, route }) {
       }),
     );
     loop.start();
-    const t1 = setTimeout(() => setStatus('Found someone nearby ✨'), 2600);
-    const t2 = setTimeout(() => {
-      const h = HOSTS[Math.floor(Math.random() * 3)];
-      navigation.replace('Call', { user: h, video, random: true });
-    }, 4200);
+    let gone = false;
+    const started = Date.now();
+    (async () => {
+      try {
+        const r = await post('/calls/random', {
+          type: video ? 'video' : 'voice',
+        });
+        if (gone) {
+          post(`/calls/${r.call.id}/cancel`).catch(() => {});
+          return;
+        }
+        setStatus('Found someone ✨');
+        // A short beat so the match doesn't feel instant/fake.
+        const wait = Math.max(0, 1800 - (Date.now() - started));
+        setTimeout(() => {
+          if (gone) {
+            post(`/calls/${r.call.id}/cancel`).catch(() => {});
+            return;
+          }
+          navigation.replace('Call', {
+            user: toAppHost(r.host),
+            video,
+            random: true,
+            call: r.call,
+            agora: r.agora,
+          });
+        }, wait);
+      } catch (e) {
+        if (gone) return;
+        if (e.code === 'insufficient_coins') {
+          navigation.replace('Wallet');
+          return;
+        }
+        setStatus(
+          e.code === 'no_hosts' || e.status === 404
+            ? 'Everyone’s busy right now — try again in a minute.'
+            : e.message,
+        );
+      }
+    })();
     return () => {
+      gone = true;
       loop.stop();
-      clearTimeout(t1);
-      clearTimeout(t2);
     };
   }, [navigation, spin, video]);
 

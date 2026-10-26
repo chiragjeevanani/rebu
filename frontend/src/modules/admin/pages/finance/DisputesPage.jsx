@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 import { ArrowRight, Check, X } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { serverTable, useApi, usePaging } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
 import {
   Button,
   Card,
@@ -21,9 +23,6 @@ import {
   Who,
 } from '../../components/ui'
 import { ago, dateTime, inr, label, num, pct } from '../../utils/format'
-
-// Timestamp for admin actions; called from event handlers only.
-const stamp = () => Date.now()
 
 const STATUSES = ['open', 'adjusted', 'rejected']
 const SOURCE = {
@@ -69,7 +68,7 @@ function AdjustModal({ d, host, onClose, onSave }) {
           <Input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} placeholder="e.g. 48" affix="₹" autoFocus />
         </Field>
         <Field label="Resolution note (shown to the host)">
-          <Textarea value={note} onChange={e => setNote(e.target.value)} placeholder={d.earning.source === 'gift' ? 'e.g. Gift wasn’t credited; added the missing amount.' : 'e.g. Call ran longer than billed; credited the difference.'} />
+          <Textarea value={note} onChange={e => setNote(e.target.value)} placeholder={d.earning?.source === 'gift' ? 'e.g. Gift wasn’t credited; added the missing amount.' : 'e.g. Call ran longer than billed; credited the difference.'} />
         </Field>
       </div>
     </Modal>
@@ -86,28 +85,28 @@ function Line({ title, value, strong, muted }) {
 }
 
 export default function DisputesPage() {
-  const { db, me, update } = useStore()
+  const { db, refreshCounts } = useStore()
   const toast = useToast()
   const [tab, setTab] = useState('open')
   const [q, setQ] = useState('')
   const [openId, setOpenId] = useState(null)
   const [modal, setModal] = useState(null) // adjust | reject
+  const [busy, setBusy] = useState(false)
   const { economy } = db.config
 
-  const base = useMemo(() => {
-    const s = q.trim().toLowerCase()
-    return db.disputes.filter(
-      d => !s || [d.id, d.hostId, d.hostName, d.earning.from, d.reason].some(v => String(v).toLowerCase().includes(s)),
-    )
-  }, [db.disputes, q])
-  const rows = base.filter(d => d.status === tab)
+  const pg = usePaging({ status: tab, q: q.trim() || undefined }, 20)
+  const res = useApi('/admin/finance/disputes', pg.query)
+  const rows = res.data?.items || []
+  const counts = res.data?.counts || {}
 
-  const d = openId ? db.disputes.find(x => x.id === openId) : null
-  const host = d ? db.hosts.find(h => h.id === d.hostId) : null
-  const agency = host?.agencyId ? db.agencies.find(a => a.id === host.agencyId) : null
+  const d = openId ? rows.find(x => x.id === openId) || null : null
+  // Host balance + agency come from the host detail.
+  const hostRes = useApi(d?.hostId ? `/admin/hosts/${d.hostId}` : null)
+  const host = hostRes.data ? { ...hostRes.data.host, available: hostRes.data.balance?.available ?? 0 } : null
+  const agency = hostRes.data?.agency || null
 
   const b = useMemo(() => {
-    if (!d) return null
+    if (!d?.earning) return null
     const commission = economy.commission[d.earning.source] ?? 0
     const gross = round2(d.earning.coins * economy.coinInr)
     const fee = round2((gross * commission) / 100)
@@ -115,50 +114,54 @@ export default function DisputesPage() {
     return { commission, gross, fee, share, diff: round2(share - d.earning.net) }
   }, [d, economy])
 
-  const adjust = (amount, note) => {
-    update('disputes', d.id, { status: 'adjusted', resolution: note, adjustment: amount, handledBy: me?.name, resolvedAt: stamp() }, [
-      `Adjusted earning dispute ${amount < 0 ? '−' : '+'}${inr(Math.abs(amount))} · ${note}`,
-      d.id,
-    ])
-    if (host) {
-      update('hosts', host.id, h => ({ available: round2(Math.max(0, h.available + amount)) }), [
-        `${amount < 0 ? 'Debited' : 'Credited'} ${inr(Math.abs(amount))} for dispute ${d.id}`,
-        host.id,
-      ])
+  const run = async (fn, done) => {
+    setBusy(true)
+    try {
+      await fn()
+      toast(done)
+    } catch (e) {
+      toast(errorText(e), 'error')
+    } finally {
+      setBusy(false)
+      res.reload()
+      hostRes.reload()
+      refreshCounts()
     }
-    toast(`${amount < 0 ? 'Debited' : 'Credited'} ${inr(Math.abs(amount))} ${amount < 0 ? 'from' : 'to'} ${d.hostName}`)
   }
 
-  const reject = reason => {
-    update('disputes', d.id, { status: 'rejected', resolution: reason, handledBy: me?.name, resolvedAt: stamp() }, [`Rejected earning dispute · ${reason}`, d.id])
-    toast('Dispute rejected')
-  }
+  const adjust = (amount, note) =>
+    run(
+      () => api.post(`/admin/finance/disputes/${d.id}/adjust`, { amount, note }),
+      `${amount < 0 ? 'Debited' : 'Credited'} ${inr(Math.abs(amount))} ${amount < 0 ? 'from' : 'to'} ${d.hostName}`,
+    )
+
+  const reject = reason => run(() => api.post(`/admin/finance/disputes/${d.id}/reject`, { reason }), 'Dispute rejected')
 
   const columns = [
     {
       key: 'host',
       label: 'Host',
-      sort: x => x.hostName,
       render: x => <Who src={x.hostAvatar} name={x.hostName} sub={x.hostId} size={32} to={`/admin/hosts/${x.hostId}`} />,
     },
     {
       key: 'earning',
       label: 'Earning',
-      sort: x => x.earning.net,
-      render: x => (
+      render: x =>
+        x.earning ? (
         <div style={{ minWidth: 0 }}>
           <b className="a-strong">{sourceLabel(x.earning.source)}</b> <span className="a-muted">from {x.earning.from}</span>
           <div className="a-small a-muted">
             {num(x.earning.coins)} coins · {inr(x.earning.net)} net
           </div>
         </div>
-      ),
+        ) : (
+          <span className="a-muted">Earning not found</span>
+        ),
     },
-    { key: 'reason', label: 'Reason', sort: x => x.reason },
+    { key: 'reason', label: 'Reason' },
     {
       key: 'ts',
       label: 'Reported',
-      sort: x => x.ts,
       render: x => (
         <span className="a-nowrap" title={dateTime(x.ts)}>
           {ago(x.ts)}
@@ -168,7 +171,6 @@ export default function DisputesPage() {
     {
       key: 'status',
       label: 'Status',
-      sort: x => x.status,
       render: x => (
         <span className="a-row" style={{ gap: 6 }}>
           <Status value={x.status} />
@@ -178,7 +180,7 @@ export default function DisputesPage() {
     },
   ]
 
-  const openCount = db.disputes.filter(x => x.status === 'open').length
+  const openCount = counts.open || 0
 
   return (
     <div className="a-stack" style={{ gap: 20 }}>
@@ -188,15 +190,15 @@ export default function DisputesPage() {
       />
 
       <div>
-        <Tabs value={tab} onChange={setTab} tabs={STATUSES.map(s => ({ value: s, label: label(s), count: base.filter(x => x.status === s).length }))} />
+        <Tabs value={tab} onChange={setTab} tabs={STATUSES.map(s => ({ value: s, label: label(s), count: counts[s] || 0 }))} />
         <Card padded={false}>
           <DataTable
             rows={rows}
             columns={columns}
-            initialSort={{ key: 'ts', dir: tab === 'open' ? 'asc' : 'desc' }}
+            {...serverTable(pg, res)}
             onRowClick={x => setOpenId(x.id)}
             empty={<Empty title={`No ${tab} disputes`} text={q ? 'Nothing matches this search.' : tab === 'open' ? 'All caught up.' : undefined} />}
-            toolbar={<SearchInput value={q} onChange={setQ} placeholder="Dispute ID, host, user, reason" />}
+            toolbar={<SearchInput value={q} onChange={setQ} placeholder="Host or reason" />}
           />
         </Card>
       </div>
@@ -208,17 +210,17 @@ export default function DisputesPage() {
         footer={
           d?.status === 'open' ? (
             <>
-              <Button variant="soft-danger" icon={X} onClick={() => setModal('reject')}>
+              <Button variant="soft-danger" icon={X} disabled={busy} onClick={() => setModal('reject')}>
                 Reject
               </Button>
-              <Button variant="primary" icon={Check} onClick={() => setModal('adjust')}>
+              <Button variant="primary" icon={Check} disabled={busy} onClick={() => setModal('adjust')}>
                 Adjust
               </Button>
             </>
           ) : null
         }
       >
-        {d && b ? (
+        {d ? (
           <div className="a-stack" style={{ gap: 18 }}>
             <div className="a-row between">
               <Who src={d.hostAvatar} name={d.hostName} sub={host ? `${d.hostId} · balance ${inr(host.available)}` : d.hostId} to={`/admin/hosts/${d.hostId}`} />
@@ -231,7 +233,8 @@ export default function DisputesPage() {
               <div className="a-small a-muted">Reported {dateTime(d.ts)}</div>
             </div>
 
-            <Card title={`${sourceLabel(d.earning.source)} from ${d.earning.from}`} subtitle={dateTime(d.earning.ts)}>
+            {b ? (
+            <Card title={`${sourceLabel(d.earning.source)} from ${d.earning.from || '—'}`} subtitle={dateTime(d.earning.ts)}>
               <Line title="Coins" value={num(d.earning.coins)} />
               <Line title={`Gross at ${inr(economy.coinInr)} / coin`} value={inr(b.gross)} />
               <Line title={`REBU commission (${pct(b.commission)})`} value={`− ${inr(b.fee)}`} muted />
@@ -249,6 +252,9 @@ export default function DisputesPage() {
                 </p>
               ) : null}
             </Card>
+            ) : (
+              <p className="a-small a-muted">The disputed earning record wasn’t found.</p>
+            )}
 
             {d.status !== 'open' ? (
               <dl className="a-dl">
@@ -288,8 +294,8 @@ export default function DisputesPage() {
           host={host}
           onClose={() => setModal(null)}
           onSave={(amount, note) => {
-            adjust(amount, note)
             setModal(null)
+            adjust(amount, note)
           }}
         />
       ) : null}
@@ -303,8 +309,8 @@ export default function DisputesPage() {
         reasonLabel="Reason (shown to the host)"
         onClose={() => setModal(null)}
         onConfirm={reason => {
-          reject(reason)
           setModal(null)
+          reject(reason)
         }}
       />
     </div>

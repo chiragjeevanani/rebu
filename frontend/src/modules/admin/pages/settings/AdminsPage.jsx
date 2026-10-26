@@ -2,7 +2,9 @@ import { useMemo, useState } from 'react'
 import { Check, Copy, KeyRound, Minus, Power, ShieldCheck, Trash2, UserPlus } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
-import { Badge, Button, Card, Confirm, DataTable, Field, Input, Modal, PageHeader, Select, Status, Who } from '../../components/ui'
+import { useApi } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
+import { Badge, Button, Card, Confirm, DataTable, ErrorState, Field, Input, Modal, PageHeader, Select, Status, Who } from '../../components/ui'
 import { ago } from '../../utils/format'
 import { NAV, ROLES } from '../../routes/nav'
 
@@ -25,18 +27,13 @@ const SECTIONS = (() => {
 
 const can = (role, section) => ROLES[role].sections === '*' || ROLES[role].sections.includes(section)
 
-function makePassword() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
-  const bytes = crypto.getRandomValues(new Uint32Array(12))
-  return Array.from(bytes, b => chars[b % chars.length]).join('').replace(/^(.{4})(.{4})(.{4})$/, '$1-$2-$3')
-}
-
 function InviteModal({ open, admins, onClose, onInvite }) {
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [role, setRole] = useState('moderator')
   const [created, setCreated] = useState(null) // { name, email, password }
   const [copied, setCopied] = useState(false)
+  const [busy, setBusy] = useState(false)
 
   const e = email.trim().toLowerCase()
   const emailError = !e
@@ -46,7 +43,7 @@ function InviteModal({ open, admins, onClose, onInvite }) {
       : admins.some(a => a.email.toLowerCase() === e)
         ? 'An admin with this email already exists'
         : null
-  const valid = name.trim() && e && !emailError
+  const valid = name.trim() && e && !emailError && !busy
 
   const copy = async () => {
     try {
@@ -103,10 +100,12 @@ function InviteModal({ open, admins, onClose, onInvite }) {
             variant="primary"
             icon={UserPlus}
             disabled={!valid}
-            onClick={() => {
-              const password = makePassword()
-              onInvite({ name: name.trim(), email: e, role, password })
-              setCreated({ name: name.trim(), email: e, role, password })
+            onClick={async () => {
+              setBusy(true)
+              // The server generates the temporary password and returns it once.
+              const r = await onInvite({ name: name.trim(), email: e, role })
+              setBusy(false)
+              if (r) setCreated({ name: r.admin.name, email: r.admin.email, role: r.admin.role, password: r.tempPassword })
             }}
           >
             Invite
@@ -133,12 +132,16 @@ function InviteModal({ open, admins, onClose, onInvite }) {
 }
 
 export default function AdminsPage() {
-  const { db, me, update, create, remove, log } = useStore()
+  const { me } = useStore()
   const toast = useToast()
+  const res = useApi('/admin/admins')
+  const admins = useMemo(() => res.data?.items || [], [res.data])
+  const fail = e => toast(errorText(e), 'error')
+  const replace = a => res.setData(d => ({ ...d, items: d.items.map(x => (x.id === a.id ? a : x)) }))
   const [inviting, setInviting] = useState(false)
   const [confirm, setConfirm] = useState(null) // { kind: 'disable'|'remove', admin }
 
-  const activeSupers = useMemo(() => db.admins.filter(a => a.role === 'super_admin' && a.status === 'active'), [db.admins])
+  const activeSupers = useMemo(() => admins.filter(a => a.role === 'super_admin' && a.status === 'active'), [admins])
 
   // Why an action is blocked for this admin, or null when it's allowed.
   const lock = a => {
@@ -147,15 +150,25 @@ export default function AdminsPage() {
     return null
   }
 
-  const changeRole = (a, role) => {
+  const changeRole = async (a, role) => {
     if (role === a.role) return
-    update('admins', a.id, { role }, [`Changed role ${roleLabel(a.role)} → ${roleLabel(role)} for ${a.name}`, a.id])
-    toast(`${a.name} is now ${roleLabel(role)}`)
+    try {
+      const { admin } = await api.patch(`/admin/admins/${a.id}`, { role })
+      replace(admin)
+      toast(`${a.name} is now ${roleLabel(role)}`)
+    } catch (e) {
+      fail(e)
+    }
   }
 
-  const setStatus = (a, status) => {
-    update('admins', a.id, { status }, [`${status === 'active' ? 'Enabled' : 'Disabled'} admin ${a.name}`, a.id])
-    toast(`${a.name} ${status === 'active' ? 'can sign in again' : 'is disabled'}`)
+  const setStatus = async (a, status) => {
+    try {
+      const { admin } = await api.post(`/admin/admins/${a.id}/status`, { status })
+      replace(admin)
+      toast(`${a.name} ${status === 'active' ? 'can sign in again' : 'is disabled'}`)
+    } catch (e) {
+      fail(e)
+    }
   }
 
   const columns = [
@@ -229,7 +242,7 @@ export default function AdminsPage() {
     <>
       <PageHeader
         title="Admins & roles"
-        subtitle={`${db.admins.length} admins · ${db.admins.filter(a => a.status === 'active').length} active · ${activeSupers.length} super admin${activeSupers.length === 1 ? '' : 's'}`}
+        subtitle={`${admins.length} admins · ${admins.filter(a => a.status === 'active').length} active · ${activeSupers.length} super admin${activeSupers.length === 1 ? '' : 's'}`}
         actions={
           <Button variant="primary" icon={UserPlus} onClick={() => setInviting(true)}>
             Invite admin
@@ -238,7 +251,11 @@ export default function AdminsPage() {
       />
 
       <Card title="Team" padded={false} style={{ marginBottom: 20 }}>
-        <DataTable rows={db.admins} columns={columns} initialSort={{ key: 'name', dir: 'asc' }} />
+        {res.error && !res.data ? (
+          <ErrorState error={res.error} onRetry={res.reload} />
+        ) : (
+          <DataTable rows={admins} columns={columns} loading={res.loading} initialSort={{ key: 'name', dir: 'asc' }} />
+        )}
       </Card>
 
       <Card title="Roles & permissions" subtitle="Which sections of the admin panel each role can open." padded={false}>
@@ -251,7 +268,7 @@ export default function AdminsPage() {
                   <th key={r} style={{ textAlign: 'center' }}>
                     {roleLabel(r)}
                     <div className="a-faint" style={{ fontWeight: 600, textTransform: 'none' }}>
-                      {db.admins.filter(a => a.role === r).length} admin{db.admins.filter(a => a.role === r).length === 1 ? '' : 's'}
+                      {admins.filter(a => a.role === r).length} admin{admins.filter(a => a.role === r).length === 1 ? '' : 's'}
                     </div>
                   </th>
                 ))}
@@ -286,20 +303,18 @@ export default function AdminsPage() {
       {inviting ? (
         <InviteModal
           open
-          admins={db.admins}
+          admins={admins}
           onClose={() => setInviting(false)}
-          onInvite={({ name, email, role, password }) => {
-            const a = create('admins', {
-              name,
-              email,
-              password,
-              role,
-              status: 'active',
-              lastLogin: null,
-              avatar: `https://i.pravatar.cc/200?img=${1 + Math.floor(Math.random() * 70)}`,
-            })
-            log(`Invited ${name} as ${roleLabel(role)}`, a.id)
-            toast(`${name} invited`)
+          onInvite={async body => {
+            try {
+              const r = await api.post('/admin/admins', body)
+              res.setData(d => ({ ...d, items: [...d.items, r.admin], total: d.total + 1 }))
+              toast(`${body.name} invited`)
+              return r
+            } catch (e) {
+              fail(e)
+              return null
+            }
           }}
         />
       ) : null}
@@ -315,15 +330,20 @@ export default function AdminsPage() {
         confirmLabel={confirm?.kind === 'remove' ? 'Remove admin' : 'Disable'}
         danger
         onClose={() => setConfirm(null)}
-        onConfirm={() => {
+        onConfirm={async () => {
           const a = confirm.admin
-          if (confirm.kind === 'remove') {
-            remove('admins', a.id, [`Removed admin ${a.name} (${roleLabel(a.role)})`, a.id])
-            toast(`${a.name} removed`)
-          } else {
-            setStatus(a, 'disabled')
-          }
           setConfirm(null)
+          if (confirm.kind === 'remove') {
+            try {
+              await api.del(`/admin/admins/${a.id}`)
+              res.setData(d => ({ ...d, items: d.items.filter(x => x.id !== a.id), total: d.total - 1 }))
+              toast(`${a.name} removed`)
+            } catch (e) {
+              fail(e)
+            }
+          } else {
+            await setStatus(a, 'disabled')
+          }
         }}
       />
     </>

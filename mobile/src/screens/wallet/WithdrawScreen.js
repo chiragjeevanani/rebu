@@ -1,7 +1,7 @@
 // Host withdrawals: payout accounts (in the verified name), amount, fee,
 // confirmation and the history of payouts with their status.
 import React, { useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, View } from 'react-native';
 import {
   CircleCheck,
   Clock3,
@@ -105,12 +105,8 @@ function AddAccountSheet({ kind, holder, onClose, onSave }) {
         onPress={() =>
           onSave(
             kind === 'upi'
-              ? { kind, label: `UPI · ${upi}`, detail: 'Usually instant' }
-              : {
-                  kind,
-                  label: `Bank ••${acc.slice(-4)}`,
-                  detail: `IFSC ${ifsc}`,
-                },
+              ? { kind, upi: upi.trim() }
+              : { kind, account: acc.trim(), ifsc: ifsc.trim().toUpperCase() },
           )
         }
       />
@@ -126,7 +122,8 @@ export default function WithdrawScreen({ navigation }) {
     balance,
     withdrawals,
     payoutMethods,
-    setPayoutMethods,
+    addPayoutMethod,
+    removePayoutMethod,
     requestWithdrawal,
   } = useApp();
   const available = Math.floor(balance.available);
@@ -135,6 +132,7 @@ export default function WithdrawScreen({ navigation }) {
   const [adding, setAdding] = useState(null); // upi | bank
   const [confirm, setConfirm] = useState(false);
   const [done, setDone] = useState(null);
+  const [busy, setBusy] = useState(false);
 
   const holder = hostApp.data?.name || user.name;
   const n = Number(amount) || 0;
@@ -148,11 +146,14 @@ export default function WithdrawScreen({ navigation }) {
       : null;
   const valid = n >= ECONOMY.minWithdraw && n <= available && !!method;
 
-  const saveAccount = m => {
-    const acct = { id: `pm${Date.now()}`, holder, ...m };
-    setPayoutMethods(list => [...list, acct]);
-    setMethodId(acct.id);
-    setAdding(null);
+  const saveAccount = async m => {
+    try {
+      const acct = await addPayoutMethod(m);
+      setMethodId(acct.id);
+      setAdding(null);
+    } catch (e) {
+      Alert.alert('Couldn’t save account', e.message);
+    }
   };
 
   if (done) {
@@ -229,10 +230,11 @@ export default function WithdrawScreen({ navigation }) {
               </View>
               <Pressable
                 hitSlop={8}
-                onPress={() => {
-                  setPayoutMethods(list => list.filter(x => x.id !== m.id));
-                  if (on) setMethodId(null);
-                }}
+                onPress={() =>
+                  removePayoutMethod(m.id)
+                    .then(() => on && setMethodId(null))
+                    .catch(e => Alert.alert('Couldn’t remove', e.message))
+                }
               >
                 <Trash2 size={18} color={colors.textFaint} />
               </Pressable>
@@ -382,14 +384,20 @@ export default function WithdrawScreen({ navigation }) {
         <Button
           title="Confirm"
           style={styles.field}
-          onPress={() => {
-            const w = requestWithdrawal(n, {
-              id: method.id,
-              label: method.label,
-            });
-            setConfirm(false);
-            setAmount('');
-            setDone(w);
+          loading={busy}
+          disabled={busy}
+          onPress={async () => {
+            setBusy(true);
+            try {
+              const w = await requestWithdrawal(n, method.id);
+              setConfirm(false);
+              setAmount('');
+              setDone(w);
+            } catch (e) {
+              Alert.alert('Withdrawal failed', e.message);
+            } finally {
+              setBusy(false);
+            }
           }}
         />
       </Sheet>

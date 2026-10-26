@@ -3,15 +3,20 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { LogOut, Menu, Moon, Search, Sun } from 'lucide-react'
 import { NAV, ROLES, canAccess } from '../routes/nav'
 import { useStore } from '../hooks/useStore'
+import { api } from '../api/client'
 import { useTheme } from '../hooks/useTheme'
 import { Avatar, Button } from './ui'
 
+const isId = s => /^[a-f\d]{24}$/i.test(s)
+
 function GlobalSearch() {
-  const { db, me } = useStore()
+  const { me } = useStore()
   const navigate = useNavigate()
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(false)
+  const [found, setFound] = useState({ term: '', items: [] })
   const box = useRef(null)
+  const term = q.trim()
 
   useEffect(() => {
     const h = e => {
@@ -24,22 +29,36 @@ function GlobalSearch() {
     return () => window.removeEventListener('keydown', h)
   }, [])
 
-  const results = useMemo(() => {
-    const t = q.trim().toLowerCase()
-    if (t.length < 2) return []
-    const hit = (...vals) => vals.some(v => String(v || '').toLowerCase().includes(t))
-    const out = []
-    if (canAccess(me.role, 'users'))
-      db.users.filter(u => hit(u.name, u.id, u.phone, u.email)).slice(0, 5)
-        .forEach(u => out.push({ key: u.id, label: u.name, sub: `User · ${u.id} · ${u.phone}`, avatar: u.avatar, to: `/admin/users/${u.id}` }))
-    if (canAccess(me.role, 'hosts'))
-      db.hosts.filter(h => hit(h.name, h.id, h.phone)).slice(0, 5)
-        .forEach(h => out.push({ key: h.id, label: h.name, sub: `Host · ${h.id} · Lv ${h.level}`, avatar: h.avatar, to: `/admin/hosts/${h.id}` }))
-    if (canAccess(me.role, 'calls'))
-      db.calls.filter(c => hit(c.id)).slice(0, 3)
-        .forEach(c => out.push({ key: c.id, label: c.id, sub: `Call · ${c.userName} → ${c.hostName}`, to: `/admin/calls?q=${c.id}` }))
-    return out
-  }, [q, db, me.role])
+  // Debounced server search across users, hosts and (by id) calls.
+  useEffect(() => {
+    if (term.length < 2) return
+    const ctrl = new AbortController()
+    const t = setTimeout(async () => {
+      const opts = { signal: ctrl.signal }
+      const safe = p => p.catch(() => null)
+      const [users, hosts, call] = await Promise.all([
+        canAccess(me.role, 'users') ? safe(api.get('/admin/users', { q: term, limit: 5 }, opts)) : null,
+        canAccess(me.role, 'hosts') ? safe(api.get('/admin/hosts', { q: term, limit: 5 }, opts)) : null,
+        canAccess(me.role, 'calls') && isId(term) ? safe(api.get(`/admin/calls/${term}`, null, opts)) : null,
+      ])
+      if (ctrl.signal.aborted) return
+      const out = []
+      users?.items.forEach(u => out.push({ key: u.id, label: u.name || u.phone, sub: `User · ${u.phone || u.id}`, avatar: u.avatar, to: `/admin/users/${u.id}` }))
+      hosts?.items.forEach(h => out.push({ key: h.id, label: h.name, sub: `Host · ${h.phone || h.id} · Lv ${h.level}`, avatar: h.avatar, to: `/admin/hosts/${h.id}` }))
+      if (call?.call) {
+        const c = call.call
+        out.push({ key: c.id, label: c.id, sub: `Call · ${c.userName} → ${c.hostName}`, to: `/admin/calls?q=${c.id}` })
+      }
+      setFound({ term, items: out })
+    }, 250)
+    return () => {
+      clearTimeout(t)
+      ctrl.abort()
+    }
+  }, [term, me.role])
+
+  const results = useMemo(() => (term.length >= 2 && found.term === term ? found.items : []), [term, found])
+  const searching = term.length >= 2 && found.term !== term
 
   const go = to => {
     setQ('')
@@ -71,7 +90,7 @@ function GlobalSearch() {
         <div className="a-card" style={{ position: 'absolute', top: 44, left: 0, right: 0, zIndex: 50, padding: 6, boxShadow: 'var(--shadow-lg)' }}>
           {results.length === 0 ? (
             <div className="a-muted" style={{ padding: 12 }}>
-              No matches for “{q}”
+              {searching ? 'Searching…' : <>No matches for “{q}”</>}
             </div>
           ) : (
             results.map(r => (
@@ -101,7 +120,7 @@ function GlobalSearch() {
 }
 
 export default function Layout() {
-  const { db, me, logout } = useStore()
+  const { counts, me, logout } = useStore()
   const { theme, setTheme } = useTheme()
   const [navOpen, setNavOpen] = useState(false)
   const [menu, setMenu] = useState(false)
@@ -126,7 +145,7 @@ export default function Layout() {
             <div key={g.title} className="a-nav-group">
               <div className="a-nav-title">{g.title}</div>
               {g.items.map(i => {
-                const n = i.badge ? i.badge(db) : 0
+                const n = i.badge ? i.badge(counts) : 0
                 return (
                   <NavLink key={i.to} to={i.to} end={i.end} className="a-nav-link" onClick={() => setNavOpen(false)}>
                     <i.icon size={18} />

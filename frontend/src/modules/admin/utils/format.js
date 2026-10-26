@@ -32,12 +32,17 @@ export function compact(value) {
 
 export const pct = (v, digits = 0) => `${(Number(v) || 0).toFixed(digits)}%`
 
+/** Timestamps may be ms numbers or ISO strings from the API. */
+export const ms = ts => (typeof ts === 'number' ? ts : new Date(ts).getTime())
+
 export function date(ts) {
+  if (ts == null || ts === '') return '—'
   const d = new Date(ts)
   return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`
 }
 
 export function dateTime(ts) {
+  if (ts == null || ts === '') return '—'
   const d = new Date(ts)
   const h = d.getHours()
   const m = String(d.getMinutes()).padStart(2, '0')
@@ -47,7 +52,8 @@ export function dateTime(ts) {
 }
 
 export function ago(ts) {
-  const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (ts == null || ts === '') return '—'
+  const s = Math.max(0, Math.round((Date.now() - ms(ts)) / 1000))
   if (s < 60) return 'just now'
   const m = Math.round(s / 60)
   if (m < 60) return `${m}m ago`
@@ -138,3 +144,12 @@ export function exportCsv(filename, rows, columns) {
   a.click()
   URL.revokeObjectURL(a.href)
 }
+
+/** '2026-10-20' (API day key) → '20 Oct' for chart axes. */
+export function dayLabel(day) {
+  const [, m, d] = String(day).split('-').map(Number)
+  return m && d ? `${d} ${MONTHS[m - 1]}` : String(day)
+}
+
+/** Add a `label` for charts to the API's per-day series. */
+export const withDayLabels = series => (series || []).map(x => ({ ...x, label: dayLabel(x.day) }))

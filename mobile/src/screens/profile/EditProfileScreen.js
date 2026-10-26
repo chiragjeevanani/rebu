@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { Dimensions, Image, Pressable, StyleSheet, View } from 'react-native';
-import { AtSign, Briefcase, MapPin, Plus, User, X } from 'lucide-react-native';
+import { Briefcase, MapPin, Plus, User, X } from 'lucide-react-native';
 import { colors, radius, spacing } from '../../theme';
 import { INTERESTS } from '../../data/mock';
 import { useApp } from '../../context/AppContext';
+import { patch, uploadImage } from '../../api/client';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
 import Txt from '../../components/Txt';
@@ -17,9 +18,16 @@ import PhotoSourceSheet from '../../components/PhotoSourceSheet';
 const SLOT_W = (Dimensions.get('window').width - spacing.md * 2 - 20) / 3;
 
 export default function EditProfileScreen({ navigation }) {
-  const { user, setUser, isHost } = useApp();
-  const [form, setForm] = useState(user);
+  const { user, applyServerUser } = useApp();
+  const [form, setForm] = useState({
+    ...user,
+    photos: user.server?.photos?.length ? user.photos : [],
+    job: user.server?.job || '',
+    interests: user.server?.interests || [],
+  });
   const [picker, setPicker] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const toggle = key =>
     set(
@@ -29,9 +37,31 @@ export default function EditProfileScreen({ navigation }) {
         : [...form.interests, key].slice(0, 6),
     );
 
-  const save = () => {
-    setUser(form);
-    navigation.goBack();
+  const save = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      // New photos are local files until uploaded.
+      const photos = await Promise.all(form.photos.map(uploadImage));
+      const r = await patch('/me', {
+        name: form.name.trim(),
+        city: form.city.trim(),
+        bio: form.bio.trim(),
+        job: form.job.trim(),
+        interests: form.interests,
+        photos,
+      });
+      applyServerUser(r.user);
+      navigation.goBack();
+    } catch (e) {
+      setError(
+        e.details?.length
+          ? `${e.message} ${e.details.map(d => d.message).join(' · ')}`
+          : e.message,
+      );
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -40,7 +70,19 @@ export default function EditProfileScreen({ navigation }) {
       edges={['top', 'bottom']}
       footer={
         <View style={styles.footer}>
-          <Button title="Save changes" onPress={save} />
+          {error ? (
+            <Txt variant="small" color={colors.danger} style={styles.error}>
+              {error}
+            </Txt>
+          ) : null}
+          <Button
+            title="Save changes"
+            onPress={save}
+            loading={busy}
+            disabled={
+              busy || form.name.trim().length < 2 || !form.photos.length
+            }
+          />
         </View>
       }
     >
@@ -88,14 +130,6 @@ export default function EditProfileScreen({ navigation }) {
           icon={User}
           value={form.name}
           onChangeText={v => set('name', v)}
-          style={styles.field}
-        />
-        <Input
-          label={isHost ? 'Username (hosts can edit anytime)' : 'Username'}
-          icon={AtSign}
-          value={form.username.replace('@', '')}
-          onChangeText={v => set('username', `@${v}`)}
-          autoCapitalize="none"
           style={styles.field}
         />
         <Input
@@ -147,6 +181,7 @@ export default function EditProfileScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
+  error: { marginBottom: 8 },
   body: { paddingHorizontal: spacing.md, paddingTop: 4 },
   label: { marginBottom: 10 },
   field: { marginBottom: 16 },

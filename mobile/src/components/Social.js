@@ -2,7 +2,13 @@
 import React from 'react';
 import { Image, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
-import { ChevronLeft, Crown, Hand, MessageCircle } from 'lucide-react-native';
+import {
+  ChevronLeft,
+  Crown,
+  Hand,
+  MessageCircle,
+  User,
+} from 'lucide-react-native';
 import { colors, fonts, radius } from '../theme';
 import Txt from './Txt';
 
@@ -40,7 +46,9 @@ export function TopTabs({ tabs, value, onChange, right, style, onBack }) {
 
 /** Pink pill with the age (♀ 24). */
 export function AgeBadge({ age, gender = 'f' }) {
-  const female = gender === 'f';
+  // 'f' / 'Female' (hosts default to female), 'Male' → blue.
+  const female = !gender || /^f/i.test(gender);
+  if (!age && !gender) return null;
   return (
     <View
       style={[
@@ -101,7 +109,13 @@ export function HostRow({ host, subtitle, right, onPress }) {
   return (
     <Pressable onPress={onPress} style={styles.row}>
       <View>
-        <Image source={{ uri: host.photo }} style={styles.rowAvatar} />
+        {host.photo ? (
+          <Image source={{ uri: host.photo }} style={styles.rowAvatar} />
+        ) : (
+          <View style={[styles.rowAvatar, styles.rowAvatarEmpty]}>
+            <User size={28} color={colors.textFaint} />
+          </View>
+        )}
         {host.online ? <View style={styles.rowOnline} /> : null}
       </View>
       <View style={styles.rowText}>
@@ -109,7 +123,7 @@ export function HostRow({ host, subtitle, right, onPress }) {
           {host.name} {host.emoji || ''}
         </Txt>
         <View style={styles.badges}>
-          <AgeBadge age={host.age} />
+          <AgeBadge age={host.age} gender={host.gender} />
           <VipBadge level={host.vip} />
         </View>
         {subtitle ? (
@@ -220,6 +234,11 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
+  },
+  rowAvatarEmpty: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceMuted,
   },
   rowAvatar: {
     width: 76,

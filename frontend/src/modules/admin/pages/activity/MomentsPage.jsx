@@ -1,8 +1,10 @@
-import { Fragment, useMemo, useState } from 'react'
-import { Check, CheckCheck, Flag, Heart, Image as ImageIcon, MessageCircle, Trash2 } from 'lucide-react'
+import { Fragment, useEffect, useState } from 'react'
+import { Check, CheckCheck, ChevronLeft, ChevronRight, Flag, Heart, Image as ImageIcon, MessageCircle, Trash2 } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
-import { Badge, Button, Card, Confirm, Empty, PageHeader, SearchInput, Select, Status, Tabs, Who } from '../../components/ui'
+import { useApi, usePaging } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
+import { Badge, Button, Card, Confirm, Empty, ErrorState, Loading, PageHeader, SearchInput, Select, Status, Tabs, Who } from '../../components/ui'
 import { ago, compact, num } from '../../utils/format'
 
 const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -32,7 +34,7 @@ function MomentCard({ m, keywords, onApprove, onRemove }) {
       ) : null}
       <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 12, flex: 1 }}>
         <div className="a-row between" style={{ alignItems: 'flex-start' }}>
-          <Who src={m.authorAvatar} name={m.authorName} sub={`${ago(m.ts)} · ${m.id}`} size={32} to={to} />
+          <Who src={m.authorAvatar} name={m.authorName} sub={`${ago(m.ts)} · ${String(m.id).slice(-8)}`} size={32} to={to} />
           <Badge tone={m.isHost ? 'brand' : 'neutral'}>{m.isHost ? 'Host' : 'User'}</Badge>
         </div>
         <p style={{ margin: 0, fontSize: m.image ? 14 : 16, fontWeight: m.image ? 500 : 600, overflowWrap: 'anywhere' }}>
@@ -70,41 +72,43 @@ function MomentCard({ m, keywords, onApprove, onRemove }) {
   )
 }
 
+const PAGE = 48
+
 export default function MomentsPage() {
-  const { db, update, log } = useStore()
+  const { db } = useStore()
   const toast = useToast()
-  const [tab, setTab] = useState(() => (db.moments.some(m => m.status === 'flagged') ? 'flagged' : 'all'))
+  const [tab, setTab] = useState('flagged')
   const [q, setQ] = useState('')
+  const [term, setTerm] = useState('')
   const [author, setAuthor] = useState('any')
   const [removeId, setRemoveId] = useState(null)
   const [bulk, setBulk] = useState(false)
+  const [busy, setBusy] = useState(false)
   const keywords = db.config.settings.moderation?.autoFlagKeywords || []
 
-  const filtered = useMemo(() => {
-    const t = q.trim().toLowerCase()
-    return db.moments.filter(
-      m =>
-        (author === 'any' || (author === 'host') === !!m.isHost) &&
-        (!t || [m.text, m.authorName, m.authorId, m.id].some(v => String(v).toLowerCase().includes(t))),
-    )
-  }, [db.moments, q, author])
+  // Debounce the search box so typing doesn't fire a request per key.
+  useEffect(() => {
+    const t = setTimeout(() => setTerm(q.trim()), 300)
+    return () => clearTimeout(t)
+  }, [q])
 
-  const counts = {
-    flagged: filtered.filter(m => m.status === 'flagged').length,
-    all: filtered.length,
-    removed: filtered.filter(m => m.status === 'removed').length,
-  }
-  const rows = useMemo(() => {
-    const list = tab === 'all' ? filtered : filtered.filter(m => m.status === tab)
-    // Most-reported first in the review queue; newest first elsewhere.
-    return [...list].sort((a, b) => (tab === 'flagged' ? b.reports - a.reports || b.ts - a.ts : b.ts - a.ts))
-  }, [filtered, tab])
+  const pg = usePaging({ status: tab, author: author === 'any' ? undefined : author, q: term || undefined }, PAGE)
+  const res = useApi('/admin/moments', pg.query)
+  const rows = res.data?.items || []
+  const c = res.data?.counts || {}
+  const total = res.data?.total || 0
+  const pages = Math.max(1, Math.ceil(total / PAGE))
 
-  const approve = m => {
-    update('moments', m.id, { status: 'published', reports: 0, removedReason: '' }, [m.status === 'removed' ? 'Restored moment' : 'Approved moment', m.id])
-    toast(m.status === 'removed' ? 'Moment restored' : 'Moment approved')
+  const approve = async m => {
+    try {
+      await api.post(`/admin/moments/${m.id}/approve`)
+      toast(m.status === 'removed' ? 'Moment restored' : 'Moment approved')
+      res.reload()
+    } catch (e) {
+      toast(errorText(e), 'error')
+    }
   }
-  const target = removeId ? db.moments.find(m => m.id === removeId) : null
+  const target = removeId ? rows.find(m => m.id === removeId) : null
 
   return (
     <>
@@ -124,9 +128,9 @@ export default function MomentsPage() {
         value={tab}
         onChange={setTab}
         tabs={[
-          { value: 'flagged', label: 'Flagged', count: counts.flagged },
-          { value: 'all', label: 'All', count: counts.all },
-          { value: 'removed', label: 'Removed', count: counts.removed },
+          { value: 'flagged', label: 'Flagged', count: c.flagged },
+          { value: 'all', label: 'All', count: (c.flagged || 0) + (c.published || 0) + (c.removed || 0) },
+          { value: 'removed', label: 'Removed', count: c.removed },
         ]}
       />
 
@@ -144,18 +148,42 @@ export default function MomentsPage() {
       </div>
 
       {rows.length ? (
-        <div style={{ display: 'grid', gap: 16, gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', alignItems: 'start' }}>
-          {rows.map(m => (
-            <MomentCard key={m.id} m={m} keywords={keywords} onApprove={() => approve(m)} onRemove={() => setRemoveId(m.id)} />
-          ))}
-        </div>
+        <>
+          <div
+            style={{ display: 'grid', gap: 16, gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', alignItems: 'start', opacity: res.loading ? 0.55 : 1 }}
+            aria-busy={res.loading || undefined}
+          >
+            {rows.map(m => (
+              <MomentCard key={m.id} m={m} keywords={keywords} onApprove={() => approve(m)} onRemove={() => setRemoveId(m.id)} />
+            ))}
+          </div>
+          {total > PAGE ? (
+            <div className="a-pager">
+              <span>
+                {(pg.page - 1) * PAGE + 1}–{Math.min(total, pg.page * PAGE)} of {total}
+              </span>
+              <span className="a-spacer" />
+              <Button size="sm" iconOnly icon={ChevronLeft} disabled={pg.page <= 1} onClick={() => pg.setPage(pg.page - 1)} aria-label="Previous page" />
+              <span>
+                Page {pg.page} of {pages}
+              </span>
+              <Button size="sm" iconOnly icon={ChevronRight} disabled={pg.page >= pages} onClick={() => pg.setPage(pg.page + 1)} aria-label="Next page" />
+            </div>
+          ) : null}
+        </>
       ) : (
         <Card>
-          <Empty
-            icon={tab === 'flagged' ? CheckCheck : ImageIcon}
-            title={tab === 'flagged' ? 'Queue is clear' : 'No moments'}
-            text={tab === 'flagged' ? 'No flagged moments need review.' : 'Nothing matches this filter.'}
-          />
+          {res.error ? (
+            <ErrorState error={res.error} onRetry={res.reload} />
+          ) : res.loading ? (
+            <Loading />
+          ) : (
+            <Empty
+              icon={tab === 'flagged' ? CheckCheck : ImageIcon}
+              title={tab === 'flagged' ? 'Queue is clear' : 'No moments'}
+              text={tab === 'flagged' ? 'No flagged moments need review.' : 'Nothing matches this filter.'}
+            />
+          )}
         </Card>
       )}
 
@@ -167,23 +195,36 @@ export default function MomentsPage() {
         danger
         reason
         onClose={() => setRemoveId(null)}
-        onConfirm={reason => {
-          update('moments', target.id, { status: 'removed', removedReason: reason }, [`Removed moment — ${reason}`, target.id])
-          toast('Moment removed')
-          setRemoveId(null)
+        onConfirm={async reason => {
+          try {
+            await api.post(`/admin/moments/${target.id}/remove`, { reason })
+            toast('Moment removed')
+            setRemoveId(null)
+            res.reload()
+          } catch (e) {
+            toast(errorText(e), 'error')
+          }
         }}
       />
       <Confirm
         open={bulk}
         title={`Approve ${rows.length} moment${rows.length === 1 ? '' : 's'}?`}
         message="Every flagged moment in this view is published again and its reports are cleared."
-        confirmLabel="Approve all"
+        confirmLabel={busy ? 'Approving…' : 'Approve all'}
         onClose={() => setBulk(false)}
-        onConfirm={() => {
-          rows.forEach(m => update('moments', m.id, { status: 'published', reports: 0 }))
-          log(`Bulk-approved ${rows.length} flagged moments`, rows.map(m => m.id).join(', '))
-          toast(`${rows.length} moments approved`)
-          setBulk(false)
+        onConfirm={async () => {
+          if (busy) return
+          setBusy(true)
+          try {
+            const r = await api.post('/admin/moments/bulk-approve', { ids: rows.map(m => m.id) })
+            toast(`${r.approved} moments approved`)
+            setBulk(false)
+            res.reload()
+          } catch (e) {
+            toast(errorText(e), 'error')
+          } finally {
+            setBusy(false)
+          }
         }}
       />
     </>

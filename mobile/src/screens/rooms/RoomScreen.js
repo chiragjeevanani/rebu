@@ -1,19 +1,23 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  Alert,
   FlatList,
   Image,
   KeyboardAvoidingView,
   Pressable,
+  Share,
   StyleSheet,
   TextInput,
   View,
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { RtcSurfaceView, RtcTextureView } from 'react-native-agora';
 import {
   ChevronDown,
   Flag,
   Gift,
+  Hand,
   LogOut,
   Mic,
   MicOff,
@@ -24,28 +28,42 @@ import {
   Video,
 } from 'lucide-react-native';
 import { colors, fonts, radius } from '../../theme';
-import { HOSTS } from '../../data/mock';
-import { ROOM_CHAT } from '../../data/social';
 import { useApp } from '../../context/AppContext';
+import { del, get, post } from '../../api/client';
+import { useSocketEvent } from '../../api/socket';
+import { useAgoraChannel } from '../../media/agora';
 import Txt from '../../components/Txt';
+import Avatar from '../../components/Avatar';
+import Button from '../../components/Button';
 import IconButton from '../../components/IconButton';
 import GiftSheet from '../../components/GiftSheet';
 import Sheet from '../../components/Sheet';
 import ListRow from '../../components/ListRow';
 import { useSecureScreen } from '../../utils/secure';
 
-const SEATS = 8;
-const LISTENERS = HOSTS.slice(1, 6);
-
-function Seat({ index, person, speaking, onPress }) {
+function Seat({ index, person, pending, video, rtc, onPress }) {
+  const remote = person && rtc.live && rtc.remoteUids.includes(person.uid);
   return (
     <Pressable style={styles.seat} onPress={onPress}>
-      <View style={[styles.seatRing, speaking && styles.seatSpeaking]}>
+      <View style={[styles.seatRing, pending && styles.seatPending]}>
         {person ? (
-          <Image source={{ uri: person.photo }} style={styles.seatImg} />
+          video && (person.me || remote) && rtc.live ? (
+            <View style={styles.seatImg}>
+              <RtcTextureView
+                canvas={{ uid: person.me ? 0 : person.uid }}
+                style={StyleSheet.absoluteFill}
+              />
+            </View>
+          ) : (
+            <Avatar uri={person.photo} size={54} />
+          )
         ) : (
           <View style={styles.seatEmpty}>
-            <Plus size={20} color="rgba(255,255,255,0.7)" />
+            {pending ? (
+              <Hand size={18} color="rgba(255,255,255,0.8)" />
+            ) : (
+              <Plus size={20} color="rgba(255,255,255,0.7)" />
+            )}
           </View>
         )}
         {person?.muted ? (
@@ -55,7 +73,7 @@ function Seat({ index, person, speaking, onPress }) {
         ) : null}
       </View>
       <Txt style={styles.seatName} numberOfLines={1}>
-        {person ? person.name : `No.${index + 1}`}
+        {person ? person.name : pending ? 'Asked…' : `No.${index + 1}`}
       </Txt>
     </Pressable>
   );
@@ -63,86 +81,241 @@ function Seat({ index, person, speaking, onPress }) {
 
 export default function RoomScreen({ navigation, route }) {
   useSecureScreen();
-  const { room } = route.params;
-  const { user } = useApp();
+  const { room: start } = route.params;
+  const roomId = start.id;
+  const { user, setCoinsFromServer } = useApp();
   const insets = useSafeAreaInsets();
-  const owner = room.host || {
-    name: user.name.split(' ')[0],
-    photo: user.photos[0],
-  };
-  const mine = !room.host;
 
-  // Seats 0–2 start occupied by listeners in other people's rooms.
-  const [seats, setSeats] = useState(() =>
-    Array.from({ length: SEATS }, (_, i) =>
-      !mine && i < 3 ? { ...LISTENERS[i], muted: i === 2 } : null,
-    ),
-  );
-  const mySeat = seats.findIndex(s => s?.me);
+  const [room, setRoom] = useState(null); // server live
+  const [agora, setAgora] = useState(route.params.agora || null);
+  const [viewers, setViewers] = useState(start.count || 0);
+  const [seats, setSeats] = useState(Array(start.seats || 8).fill(null));
+  const [requests, setRequests] = useState([]); // owner: who asked
+  const [asked, setAsked] = useState(null); // seat I asked for
   const [muted, setMuted] = useState(false);
-  const [chat, setChat] = useState(ROOM_CHAT);
+  const [chat, setChat] = useState([
+    {
+      id: 'w',
+      system: true,
+      text: start.welcome || 'Welcome! Be kind and have fun 💜',
+    },
+  ]);
   const [text, setText] = useState('');
-  const [gift, setGift] = useState(false);
+  const [gift, setGift] = useState(null); // recipient
   const [menu, setMenu] = useState(false);
-  const [speaking, setSpeaking] = useState(0);
+  const [reqSheet, setReqSheet] = useState(false);
   const list = useRef(null);
+  const left = useRef(false);
 
-  // Fake "who is talking" highlight so the room feels live.
-  useEffect(() => {
-    const t = setInterval(() => setSpeaking(s => (s + 1) % 4), 1600);
-    return () => clearInterval(t);
-  }, []);
+  const owner = room?.owner || start.owner || {};
+  const isOwner = owner.id === user.id;
+  const isVideo = (room?.mode || start.mode) === 'party';
+  const rtc = useAgoraChannel(agora, { video: isVideo });
+  const mySeat = seats.findIndex(s => s?.me);
 
   const say = entry => {
-    setChat(c => [...c, { id: String(Date.now()), ...entry }]);
+    setChat(c => [
+      ...c.slice(-60),
+      { id: entry.id || `${Date.now()}${Math.random()}`, ...entry },
+    ]);
     setTimeout(() => list.current?.scrollToEnd({ animated: true }), 50);
   };
-
-  const takeSeat = i => {
-    if (seats[i] || mySeat >= 0) return;
-    setSeats(s =>
-      s.map((x, j) =>
-        j === i ? { name: 'You', photo: user.photos[0], me: true } : x,
-      ),
+  const fromServer = m =>
+    m.kind === 'gift'
+      ? {
+          id: m.id,
+          name: m.user?.name,
+          text: `sent ${m.gift?.emoji} ${m.gift?.name}`,
+          gift: true,
+        }
+      : m.kind === 'system'
+      ? { id: m.id, system: true, text: m.text }
+      : { id: m.id, name: m.user?.name, text: m.text };
+  const toSeats = (arr, n) =>
+    (arr || Array(n).fill(null)).map(g =>
+      g
+        ? {
+            id: g.user.id,
+            name: g.user.id === user.id ? 'You' : g.user.name,
+            photo: g.user.photo,
+            uid: g.uid,
+            muted: g.muted,
+            me: g.user.id === user.id,
+          }
+        : null,
     );
+
+  // Join (owners get a publisher token; everyone else listens).
+  useEffect(() => {
+    (async () => {
+      try {
+        const j = await post(`/lives/${roomId}/join`);
+        if (typeof j.balance === 'number') setCoinsFromServer(j.balance);
+        const { live } = await get(`/lives/${roomId}`);
+        setRoom(live);
+        setViewers(live.viewers);
+        setSeats(toSeats(live.seats, live.maxGuests));
+        setChat(c => [...c, ...(live.chat || []).map(fromServer)]);
+        setAgora(j.agora);
+      } catch (e) {
+        Alert.alert('Room unavailable', e.message);
+        left.current = true;
+        navigation.goBack();
+      }
+    })();
+    return () => {
+      if (left.current) return;
+      // Owners close the room when they leave it; listeners just leave.
+      post(`/lives/${roomId}/${isOwnerRef.current ? 'end' : 'leave'}`).catch(
+        () => {},
+      );
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId]);
+  const isOwnerRef = useRef(isOwner);
+  isOwnerRef.current = isOwner;
+
+  const here = p => p?.liveId === roomId;
+  useSocketEvent('live:chat', p => {
+    if (here(p) && p.message.user?.id !== user.id) say(fromServer(p.message));
+  });
+  useSocketEvent('live:viewer_joined', p => {
+    if (!here(p)) return;
+    setViewers(p.viewers);
+    if (p.user?.id !== user.id)
+      say({ system: true, text: `${p.user?.name} joined the room` });
+  });
+  useSocketEvent('live:viewer_left', p => here(p) && setViewers(p.viewers));
+  useSocketEvent('live:gift', p => {
+    if (!here(p) || p.from?.id === user.id) return;
     say({
-      name: 'System',
-      text: 'You took a seat. Tap the mic to talk.',
-      system: true,
+      name: p.from?.name,
+      text: `sent ${p.gift?.emoji} ${p.gift?.name}`,
+      gift: true,
     });
-  };
-  const leaveSeat = () => setSeats(s => s.map(x => (x?.me ? null : x)));
+  });
+  useSocketEvent('live:guests', p => {
+    if (!here(p)) return;
+    setSeats(toSeats(p.seats, seats.length));
+  });
+  useSocketEvent('live:requests', p => {
+    if (here(p)) setRequests(p.requests);
+  });
+  useSocketEvent('live:request', p => {
+    if (here(p)) say({ system: true, text: `${p.user.name} asked for a seat` });
+  });
+  useSocketEvent('live:accepted', p => {
+    if (!here(p)) return;
+    setAsked(null);
+    setAgora(p.agora); // publisher: mic (and camera in party rooms) on
+    say({ system: true, text: 'You’re on a seat. Tap the mic to mute.' });
+  });
+  useSocketEvent('live:declined', p => {
+    if (!here(p)) return;
+    setAsked(null);
+    say({ system: true, text: 'The host didn’t give you a seat this time.' });
+  });
+  useSocketEvent('live:removed', p => {
+    if (!here(p)) return;
+    if (p.agora) setAgora(p.agora);
+    say({ system: true, text: 'You’re back to listening.' });
+  });
+  useSocketEvent('live:ended', p => {
+    if (!here(p) || isOwner) return;
+    left.current = true;
+    Alert.alert('Room closed', `${owner.name} closed the room.`);
+    navigation.goBack();
+  });
 
-  const send = () => {
-    if (!text.trim()) return;
-    say({ name: 'You', text: text.trim() });
+  const act = (path, method = post) =>
+    method(`/lives/${roomId}${path}`).catch(e =>
+      say({ system: true, text: e.message }),
+    );
+
+  const tapSeat = async (p, i) => {
+    if (p) {
+      if (p.me) return act(`/guests/${user.id}/remove`);
+      if (isOwner) {
+        return Alert.alert(p.name, 'Take them off the seat?', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Remove', onPress: () => act(`/guests/${p.id}/remove`) },
+        ]);
+      }
+      return setGift(p);
+    }
+    if (isOwner || mySeat >= 0) return;
+    if (asked != null) {
+      setAsked(null);
+      return act('/requests', del);
+    }
+    try {
+      await post(`/lives/${roomId}/requests`, { seat: i });
+      setAsked(i);
+      say({ system: true, text: `You asked for seat ${i + 1}.` });
+    } catch (e) {
+      say({ system: true, text: e.message });
+    }
+  };
+
+  const send = async () => {
+    const t = text.trim();
+    if (!t) return;
     setText('');
+    try {
+      await post(`/lives/${roomId}/chat`, { text: t });
+      say({ name: 'You', text: t });
+    } catch (e) {
+      setText(t);
+      say({ system: true, text: e.message });
+    }
   };
 
-  const isVideo = room.kind === 'video';
+  const exit = async () => {
+    setMenu(false);
+    // Owners close the room before leaving so the rooms list is already
+    // up to date; listeners leave in the unmount cleanup.
+    if (isOwner) {
+      left.current = true;
+      await post(`/lives/${roomId}/end`).catch(() => {});
+    }
+    navigation.goBack();
+  };
 
   return (
     <LinearGradient colors={['#121212', '#121212']} style={styles.root}>
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
-        <Image source={{ uri: room.cover }} style={styles.headerCover} />
+        <Image
+          source={{ uri: room?.cover || start.cover }}
+          style={styles.headerCover}
+        />
         <View style={styles.flex}>
           <Txt style={styles.title} numberOfLines={1}>
-            {room.title}
+            {room?.title || start.title}
           </Txt>
           <View style={styles.headerMeta}>
             <Users size={12} color="rgba(255,255,255,0.75)" />
             <Txt style={styles.headerMetaText}>
-              {room.count + (mySeat >= 0 ? 1 : 0)} online · {room.category}
+              {viewers + 1} online · {room?.category || start.category}
             </Txt>
           </View>
         </View>
-        <IconButton icon={Share2} variant="glass" size={36} iconSize={16} />
+        <IconButton
+          icon={Share2}
+          variant="glass"
+          size={36}
+          iconSize={16}
+          onPress={() =>
+            Share.share({
+              message: `Join my room “${room?.title || start.title}” on REBU!`,
+            })
+          }
+        />
         <IconButton
           icon={ChevronDown}
           variant="glass"
           size={36}
           iconSize={18}
-          onPress={() => navigation.goBack()}
+          onPress={() => setMenu(true)}
         />
       </View>
 
@@ -150,23 +323,32 @@ export default function RoomScreen({ navigation, route }) {
       <View style={styles.stage}>
         {isVideo ? (
           <View style={styles.videoStage}>
-            <Image
-              source={{ uri: owner.photo }}
-              style={StyleSheet.absoluteFill}
-            />
+            {rtc.live &&
+            (isOwner || rtc.remoteUids.includes(room?.ownerUid)) ? (
+              <RtcSurfaceView
+                canvas={{ uid: isOwner ? 0 : room.ownerUid }}
+                style={StyleSheet.absoluteFill}
+              />
+            ) : (
+              <Image
+                source={{ uri: owner.photo }}
+                style={StyleSheet.absoluteFill}
+              />
+            )}
             <View style={styles.liveTag}>
               <Video size={12} color={colors.white} />
               <Txt style={styles.liveText}>LIVE</Txt>
             </View>
           </View>
         ) : (
-          <View
-            style={[styles.ownerRing, speaking === 0 && styles.seatSpeaking]}
+          <Pressable
+            style={styles.ownerRing}
+            onPress={() => (isOwner ? null : setGift(owner))}
           >
-            <Image source={{ uri: owner.photo }} style={styles.ownerImg} />
-          </View>
+            <Avatar uri={owner.photo} size={96} />
+          </Pressable>
         )}
-        <Txt style={styles.ownerName}>👑 {owner.name}</Txt>
+        <Txt style={styles.ownerName}>👑 {isOwner ? 'You' : owner.name}</Txt>
       </View>
 
       <View style={styles.seats}>
@@ -175,8 +357,10 @@ export default function RoomScreen({ navigation, route }) {
             key={i}
             index={i}
             person={p}
-            speaking={p && !p.muted && speaking === i + 1}
-            onPress={() => (p?.me ? leaveSeat() : takeSeat(i))}
+            pending={!p && asked === i}
+            video={isVideo}
+            rtc={rtc}
+            onPress={() => tapSeat(p, i)}
           />
         ))}
       </View>
@@ -218,29 +402,46 @@ export default function RoomScreen({ navigation, route }) {
             iconSize={18}
             onPress={send}
           />
-          {mySeat >= 0 ? (
+          {isOwner || mySeat >= 0 ? (
             <IconButton
               icon={muted ? MicOff : Mic}
               variant={muted ? 'light' : 'glass'}
               color={muted ? colors.ink : undefined}
               size={42}
               iconSize={19}
-              onPress={() => {
-                setMuted(m => !m);
-                setSeats(s =>
-                  s.map(x => (x?.me ? { ...x, muted: !muted } : x)),
-                );
-              }}
+              onPress={() =>
+                setMuted(m => {
+                  rtc.setMuted(!m);
+                  return !m;
+                })
+              }
             />
           ) : null}
-          <IconButton
-            icon={Gift}
-            variant="gradient"
-            gradient={colors.gradientWarm}
-            size={42}
-            iconSize={19}
-            onPress={() => setGift(true)}
-          />
+          {isOwner ? (
+            <View>
+              <IconButton
+                icon={Hand}
+                variant="glass"
+                size={42}
+                iconSize={18}
+                onPress={() => setReqSheet(true)}
+              />
+              {requests.length ? (
+                <View style={styles.badge}>
+                  <Txt style={styles.badgeText}>{requests.length}</Txt>
+                </View>
+              ) : null}
+            </View>
+          ) : (
+            <IconButton
+              icon={Gift}
+              variant="gradient"
+              gradient={colors.gradientWarm}
+              size={42}
+              iconSize={19}
+              onPress={() => setGift(owner)}
+            />
+          )}
           <IconButton
             icon={LogOut}
             variant="glass"
@@ -252,21 +453,58 @@ export default function RoomScreen({ navigation, route }) {
       </KeyboardAvoidingView>
 
       <GiftSheet
-        to={owner.name}
-        visible={gift}
-        onClose={() => setGift(false)}
+        to={gift?.name}
+        toId={gift?.id}
+        context={{ type: 'live', id: roomId }}
+        visible={!!gift}
+        onClose={() => setGift(null)}
         onSend={g =>
           say({
             name: 'You',
-            text: `sent ${g.emoji} ${g.name} to ${owner.name}`,
+            text: `sent ${g.emoji} ${g.name} to ${gift?.name}`,
             gift: true,
           })
         }
         onRecharge={() => {
-          setGift(false);
+          setGift(null);
           navigation.navigate('Wallet');
         }}
       />
+      <Sheet
+        visible={reqSheet}
+        onClose={() => setReqSheet(false)}
+        dark
+        title="Seat requests"
+      >
+        {requests.length ? (
+          requests.map(r => (
+            <View key={r.user.id} style={styles.reqRow}>
+              <Avatar uri={r.user.photo} size={40} />
+              <Txt style={[styles.flex, styles.reqName]} numberOfLines={1}>
+                {r.user.name}
+                {r.seat != null ? ` · seat ${r.seat + 1}` : ''}
+              </Txt>
+              <Button
+                title="No"
+                size="sm"
+                variant="dark"
+                full={false}
+                onPress={() => act(`/requests/${r.user.id}/decline`)}
+              />
+              <Button
+                title="Seat"
+                size="sm"
+                full={false}
+                onPress={() => act(`/requests/${r.user.id}/accept`)}
+              />
+            </View>
+          ))
+        ) : (
+          <Txt style={styles.reqEmpty}>
+            No one is waiting. Listeners tap an empty seat to ask.
+          </Txt>
+        )}
+      </Sheet>
       <Sheet visible={menu} onClose={() => setMenu(false)} dark>
         {mySeat >= 0 ? (
           <ListRow
@@ -275,30 +513,34 @@ export default function RoomScreen({ navigation, route }) {
             title="Leave my seat"
             subtitle="Stay in the room as a listener"
             onPress={() => {
-              leaveSeat();
+              act(`/guests/${user.id}/remove`);
               setMenu(false);
             }}
           />
         ) : null}
-        <ListRow
-          dark
-          icon={Flag}
-          title="Report room"
-          onPress={() => {
-            setMenu(false);
-            navigation.navigate('Report', { name: room.title });
-          }}
-        />
+        {isOwner ? null : (
+          <ListRow
+            dark
+            icon={Flag}
+            title="Report room"
+            onPress={() => {
+              setMenu(false);
+              navigation.navigate('Report', {
+                name: room?.title || start.title,
+                targetType: 'room',
+                targetId: roomId,
+              });
+            }}
+          />
+        )}
         <ListRow
           dark
           icon={LogOut}
-          title="Exit room"
+          title={isOwner ? 'Close room' : 'Exit room'}
+          subtitle={isOwner ? 'Everyone in the room will be removed' : null}
           danger
           last
-          onPress={() => {
-            setMenu(false);
-            navigation.goBack();
-          }}
+          onPress={exit}
         />
       </Sheet>
     </LinearGradient>
@@ -374,8 +616,34 @@ const styles = StyleSheet.create({
     borderWidth: 2.5,
     borderColor: 'transparent',
   },
-  seatSpeaking: { borderColor: '#22C55E' },
-  seatImg: { width: 54, height: 54, borderRadius: 27 },
+  seatPending: { borderColor: '#FFC94D' },
+  badge: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 4,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeText: { fontFamily: fonts.bold, fontSize: 11, color: colors.white },
+  reqRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+  },
+  reqName: { fontFamily: fonts.semibold, fontSize: 14, color: colors.white },
+  reqEmpty: {
+    fontFamily: fonts.medium,
+    fontSize: 13.5,
+    color: 'rgba(255,255,255,0.7)',
+    paddingVertical: 12,
+  },
+  seatImg: { width: 54, height: 54, borderRadius: 27, overflow: 'hidden' },
   seatEmpty: {
     width: 54,
     height: 54,

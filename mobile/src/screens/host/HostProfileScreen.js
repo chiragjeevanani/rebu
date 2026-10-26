@@ -306,7 +306,11 @@ export default function HostProfileScreen({ navigation, route }) {
           subtitle="Fake profile, inappropriate behaviour, spam…"
           onPress={() => {
             setMenu(false);
-            navigation.navigate('Report', { name: host.name });
+            navigation.navigate('Report', {
+              name: host.name,
+              targetType: 'host',
+              targetId: host.id,
+            });
           }}
         />
         <ListRow

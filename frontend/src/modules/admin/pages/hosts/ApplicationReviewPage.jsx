@@ -1,10 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { AlertTriangle, ArrowRight, Check, CheckCircle2, ChevronLeft, ChevronRight, FileX, ShieldCheck, X, XCircle } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
-import { Avatar, Badge, Button, Card, Empty, Field, Modal, PageHeader, Progress, Status, Textarea } from '../../components/ui'
-import { ago, dateTime, inr, num } from '../../utils/format'
+import { useApi } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
+import { Avatar, Badge, Button, Card, Empty, Field, Modal, PageHeader, Pending, Progress, Status, Textarea } from '../../components/ui'
+import { ago, date, dateTime, inr, num } from '../../utils/format'
 
 const REJECT_REASONS = [
   'Selfie doesn’t match profile photos',
@@ -33,6 +35,20 @@ const clampRate = (tiers, value, cap) => {
 }
 
 function Photo({ src, label, ratio = '3 / 4' }) {
+  if (!src) {
+    return (
+      <figure style={{ margin: 0 }}>
+        <div className="a-thumb a-muted a-small" style={{ width: '100%', aspectRatio: ratio, display: 'grid', placeItems: 'center' }}>
+          Not provided
+        </div>
+        {label ? (
+          <figcaption className="a-small a-muted" style={{ marginTop: 6, fontWeight: 600 }}>
+            {label}
+          </figcaption>
+        ) : null}
+      </figure>
+    )
+  }
   return (
     <figure style={{ margin: 0 }}>
       <a href={src} target="_blank" rel="noreferrer" title="Open full size">
@@ -86,112 +102,68 @@ function RejectModal({ open, app, onClose, onSave }) {
   )
 }
 
-function Review({ app }) {
-  const { db, me, update, create } = useStore()
+function Review({ d, reload }) {
+  const { db, counts, refreshCounts } = useStore()
   const toast = useToast()
   const navigate = useNavigate()
   const [checks, setChecks] = useState({})
   const [rejecting, setRejecting] = useState(false)
+  const [busy, setBusy] = useState(false)
 
+  const app = d.application
   const { economy, hostLevels, rateTiers, settings } = db.config
   const minAge = settings.hostApply?.minAge || 18
-  const pending = useMemo(
-    () => db.applications.filter(a => a.status === 'pending').sort((a, b) => a.submittedAt - b.submittedAt),
-    [db.applications],
-  )
-  const idx = pending.findIndex(a => a.id === app.id)
-  const prev = idx > 0 ? pending[idx - 1] : null
-  const next = idx >= 0 ? pending[idx + 1] || null : pending[0] || null
+  const prev = d.prevId ? { id: d.prevId } : null
+  const next = d.nextId ? { id: d.nextId } : null
+  const photos = app.photos || []
+  const appRates = app.rates || { video: 0, voice: 0 }
 
   const code = (app.agencyCode || '').trim().toUpperCase()
-  const agency = code ? db.agencies.find(a => a.code.toUpperCase() === code) : null
+  const agency = d.matchingAgency
   const agencyOk = agency && agency.status === 'active'
 
   const level1 = hostLevels.find(l => l.level === 1) || hostLevels[0]
   const cap = level1?.maxRate ?? Infinity
   const rates = {
-    video: clampRate(rateTiers.video, app.rates.video, cap),
-    voice: clampRate(rateTiers.voice, app.rates.voice, cap),
+    video: clampRate(rateTiers.video, appRates.video, cap),
+    voice: clampRate(rateTiers.voice, appRates.voice, cap),
   }
-  const clamped = rates.video !== app.rates.video || rates.voice !== app.rates.voice
+  const clamped = rates.video !== appRates.video || rates.voice !== appRates.voice
 
-  // Checks the reviewer would otherwise do by eye.
-  const keywords = settings.moderation?.autoFlagKeywords || []
-  const bio = String(app.bio || '')
-  const bioContact = /\d{7,}|\d{3,}[\s-]\d{3,}|@|https?:|\.com/i.test(bio) || keywords.some(k => bio.toLowerCase().includes(k))
-  const autoFlags = [
-    ...(app.age < minAge ? [{ text: `Under ${minAge} (age ${app.age})`, tone: 'danger' }] : []),
-    ...(app.faceMatch < 70 ? [{ text: `Face match only ${app.faceMatch}%`, tone: 'danger' }] : []),
-    ...(code && !agency ? [{ text: `Agency code ${code} doesn’t match any agency`, tone: 'warning' }] : []),
-    ...(agency && !agencyOk ? [{ text: `Agency ${agency.name} is suspended`, tone: 'warning' }] : []),
-    ...(bioContact ? [{ text: 'Bio may contain contact details', tone: 'warning' }] : []),
-  ]
-  const flags = [...app.flags.map(f => ({ text: f, tone: 'warning' })), ...autoFlags.filter(f => !app.flags.includes(f.text))]
+  // Stored + automatic flags, computed by the server.
+  const flags = d.flags || []
 
   const decided = app.status !== 'pending'
   const allChecked = CHECKLIST.every(([k]) => checks[k])
   const welcome = Math.round(economy.welcomeBonusCoins * economy.coinInr * 100) / 100
 
-  // Seed approvals predate hostId, so fall back to matching on phone.
-  const host = decided && app.status === 'approved'
-    ? db.hosts.find(h => h.id === app.hostId) || db.hosts.find(h => h.phone === app.phone)
-    : null
+  // An approved application's host is the applicant's own user account.
+  const host = decided && app.status === 'approved' ? { id: app.user } : null
 
-  const approve = () => {
-    const nums = db.hosts.map(h => Number(String(h.id).replace(/^H/, ''))).filter(Number.isFinite)
-    const hostId = `H${Math.max(2000, ...nums) + 1}`
-    const ts = Date.now()
-    create('hosts', {
-      id: hostId,
-      name: app.name,
-      phone: app.phone,
-      avatar: app.avatar,
-      photos: app.photos,
-      gender: app.gender,
-      age: app.age,
-      city: app.city || '',
-      languages: app.languages,
-      bio: app.bio,
-      level: 1,
-      rates,
-      status: 'active',
-      online: false,
-      rating: 5,
-      followers: 0,
-      agencyId: agencyOk ? agency.id : null,
-      joined: ts,
-      callMinutes: 0,
-      lifetime: 0,
-      available: welcome,
-      answerRate: 100,
-      idType: app.idType,
-      idLast4: app.idLast4,
-      verified: true,
-      applicationId: app.id,
-    })
-    // Target names both IDs so the entry shows on the host's admin history too.
-    update('applications', app.id, { status: 'approved', reviewedBy: me?.name || 'Admin', reviewedAt: ts, reasons: [], hostId }, [
-      'Approved host application',
-      `${app.id} → ${hostId}`,
-    ])
-    toast(`${app.name} approved as host ${hostId}`)
+  const act = async (fn, ok) => {
+    setBusy(true)
+    try {
+      await fn()
+      toast(ok)
+      setRejecting(false)
+      refreshCounts()
+      reload()
+    } catch (e) {
+      toast(errorText(e), 'error')
+    }
+    setBusy(false)
   }
 
-  const reject = reasons => {
-    update('applications', app.id, { status: 'rejected', reviewedBy: me?.name || 'Admin', reviewedAt: Date.now(), reasons }, [
-      `Rejected host application — ${reasons.join('; ')}`,
-      app.id,
-    ])
-    setRejecting(false)
-    toast(`${app.name} rejected`)
-  }
+  const approve = () => act(() => api.post(`/admin/applications/${app.id}/approve`), `${app.name} approved as a host`)
+
+  const reject = reasons => act(() => api.post(`/admin/applications/${app.id}/reject`, { reasons }), `${app.name} rejected`)
 
   const decisionButtons = (
     <>
-      <Button variant="soft-danger" icon={X} onClick={() => setRejecting(true)}>
+      <Button variant="soft-danger" icon={X} disabled={busy} onClick={() => setRejecting(true)}>
         Reject
       </Button>
-      <Button variant="success" icon={Check} disabled={!allChecked} onClick={approve} title={allChecked ? undefined : 'Complete the checklist first'}>
+      <Button variant="success" icon={Check} disabled={!allChecked || busy} onClick={approve} title={allChecked ? undefined : 'Complete the checklist first'}>
         Approve
       </Button>
     </>
@@ -218,10 +190,8 @@ function Review({ app }) {
         }
         actions={
           <>
-            {idx >= 0 ? (
-              <span className="a-small a-muted a-nowrap">
-                {idx + 1} of {pending.length} pending
-              </span>
+            {counts.pendingApplications ? (
+              <span className="a-small a-muted a-nowrap">{counts.pendingApplications} pending</span>
             ) : null}
             <Button iconOnly icon={ChevronLeft} disabled={!prev} onClick={() => navigate(`/admin/host-applications/${prev.id}`)} aria-label="Previous pending" title="Previous pending" />
             <Button iconOnly icon={ChevronRight} disabled={!next} onClick={() => navigate(`/admin/host-applications/${next.id}`)} aria-label="Next pending" title="Next pending" />
@@ -266,7 +236,7 @@ function Review({ app }) {
             <div className="a-row wrap">
               {host ? (
                 <Link to={`/admin/hosts/${host.id}`} className="a-btn secondary">
-                  View host {host.id} <ArrowRight size={16} />
+                  View host <ArrowRight size={16} />
                 </Link>
               ) : null}
               {next ? (
@@ -288,12 +258,13 @@ function Review({ app }) {
           <Card
             title="Face match"
             subtitle="Live selfie taken in the app vs. the main profile photo"
-            actions={<Badge tone={matchTone(app.faceMatch)}>{app.faceMatch}% match</Badge>}
+            actions={typeof app.faceMatch === 'number' ? <Badge tone={matchTone(app.faceMatch)}>{app.faceMatch}% match</Badge> : <Badge>Not scored</Badge>}
           >
             <div className="a-grid c2">
               <Photo src={app.selfie} label="Live selfie" />
-              <Photo src={app.photos[0]} label="Main profile photo" />
+              <Photo src={photos[0]} label="Main profile photo" />
             </div>
+            {typeof app.faceMatch === 'number' ? (
             <div style={{ marginTop: 14 }}>
               <div className="a-row between a-small" style={{ marginBottom: 6 }}>
                 <span className="a-muted">Similarity score</span>
@@ -304,10 +275,11 @@ function Review({ app }) {
                 80+ is a confident match · 70–79 check carefully · below 70 usually a different person
               </div>
             </div>
+            ) : null}
           </Card>
-          <Card title="Profile photos" subtitle={`${app.photos.length} photos · shown on the host’s profile`}>
+          <Card title="Profile photos" subtitle={`${photos.length} photos · shown on the host’s profile`}>
             <div className="a-grid c3">
-              {app.photos.map((p, i) => (
+              {photos.map((p, i) => (
                 <Photo key={p} src={p} label={i === 0 ? 'Main' : `Photo ${i + 1}`} />
               ))}
             </div>
@@ -323,12 +295,12 @@ function Review({ app }) {
               <dt>Name</dt>
               <dd>{app.name}</dd>
               <dt>Phone</dt>
-              <dd>{app.phone}</dd>
+              <dd>{app.phone || '—'}</dd>
               <dt>Gender</dt>
               <dd>{app.gender}</dd>
               <dt>Date of birth</dt>
               <dd>
-                {app.dob} · <span className={app.age < minAge ? 'a-danger' : app.age < 19 ? 'a-warning' : ''}>{app.age} yrs</span>
+                {app.dob ? date(app.dob) : '—'} · <span className={app.age < minAge ? 'a-danger' : app.age < 19 ? 'a-warning' : ''}>{app.age ?? '—'} yrs</span>
               </dd>
               <dt>Languages</dt>
               <dd>{(app.languages || []).join(', ') || '—'}</dd>
@@ -357,7 +329,7 @@ function Review({ app }) {
               </dd>
               <dt>Requested rates</dt>
               <dd>
-                Video {app.rates.video} · Voice {app.rates.voice} coins/min
+                Video {appRates.video} · Voice {appRates.voice} coins/min
                 {clamped ? (
                   <span className="a-small a-warning" style={{ display: 'block' }}>
                     Level 1 cap is {cap}: will start at {rates.video} / {rates.voice}
@@ -384,6 +356,20 @@ function Review({ app }) {
               </div>
             )}
           </Card>
+
+          {d.previousApplications?.length ? (
+            <Card title="Earlier applications" padded={false}>
+              {d.previousApplications.map(p => (
+                <Link key={p.id} to={`/admin/host-applications/${p.id}`} className="a-list-row">
+                  <Status value={p.status} />
+                  <span style={{ flex: 1 }} className="a-small a-muted">
+                    {p.reasons?.length ? p.reasons.join('; ') : ''}
+                  </span>
+                  <span className="a-small a-muted a-nowrap">{date(p.createdAt)}</span>
+                </Link>
+              ))}
+            </Card>
+          ) : null}
 
           {decided ? null : (
             <Card
@@ -420,10 +406,9 @@ function Review({ app }) {
 
 export default function ApplicationReviewPage() {
   const { id } = useParams()
-  const { db } = useStore()
-  const app = db.applications.find(a => a.id === id)
+  const res = useApi(`/admin/applications/${id}`)
 
-  if (!app) {
+  if (res.error?.status === 404 || res.error?.status === 400) {
     return (
       <>
         <PageHeader crumbs={[{ label: 'Host applications', to: '/admin/host-applications' }, { label: 'Not found' }]} title="Application not found" />
@@ -440,5 +425,5 @@ export default function ApplicationReviewPage() {
   }
 
   // Keyed so the checklist and reject form start fresh for each application.
-  return <Review key={app.id} app={app} />
+  return <Pending res={res}>{d => <Review key={d.application.id} d={d} reload={res.reload} />}</Pending>
 }

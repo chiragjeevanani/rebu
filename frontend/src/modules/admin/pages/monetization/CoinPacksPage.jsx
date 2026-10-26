@@ -2,10 +2,11 @@ import { useMemo, useState } from 'react'
 import { ArrowDown, ArrowUp, Coins, IndianRupee, Pencil, Plus, ShoppingBag, Sparkles, Trash2 } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { useApi } from '../../hooks/useApi'
+import { errorText } from '../../api/client'
 import { Badge, Button, Card, Confirm, DataTable, Empty, Field, Input, Modal, PageHeader, Setting, Stat, Switch } from '../../components/ui'
 import { inr, num } from '../../utils/format'
 
-const DAY = 86400000
 const TAGS = ['Popular', 'Best value', 'First recharge', 'Limited']
 
 const total = p => p.coins + p.bonus
@@ -106,21 +107,27 @@ const diff = (a, b) => {
 export default function CoinPacksPage() {
   const { db, setConfig } = useStore()
   const toast = useToast()
-  const [now] = useState(() => Date.now())
   const [editing, setEditing] = useState(null) // pack | 'new'
   const [deleting, setDeleting] = useState(null)
   const packs = db.config.coinPacks
 
-  const sales = useMemo(() => {
-    const out = {}
-    for (const t of db.transactions) {
-      if (t.status !== 'success' || t.ts < now - 30 * DAY) continue
-      const s = (out[t.packId] ||= { count: 0, amount: 0 })
-      s.count += 1
-      s.amount += t.amount
+  // Successful payments per pack, last 30 days.
+  const revenue = useApi('/admin/finance/revenue', { days: 30 })
+  const sales = useMemo(
+    () => Object.fromEntries((revenue.data?.byPack || []).map(x => [x.packId, { count: x.count, amount: x.revenue }])),
+    [revenue.data],
+  )
+
+  const persist = async (list, msg) => {
+    try {
+      await setConfig('coinPacks', list)
+      if (msg) toast(msg)
+      return true
+    } catch (e) {
+      toast(errorText(e), 'error')
+      return false
     }
-    return out
-  }, [db.transactions, now])
+  }
 
   const totals = useMemo(() => {
     const all = Object.values(sales)
@@ -136,52 +143,32 @@ export default function CoinPacksPage() {
   const move = (index, dir) => {
     const to = index + dir
     if (to < 0 || to >= packs.length) return
-    const p = packs[index]
-    setConfig(
-      'coinPacks',
-      list => {
-        const next = [...list]
-        ;[next[index], next[to]] = [next[to], next[index]]
-        return next
-      },
-      [`Moved coin pack ${packName(p)} ${dir < 0 ? 'up' : 'down'} to position ${to + 1}`, 'Coin packs'],
+    const next = [...packs]
+    ;[next[index], next[to]] = [next[to], next[index]]
+    persist(next)
+  }
+
+  const toggle = p =>
+    persist(
+      packs.map(x => (x.id === p.id ? { ...x, active: !x.active } : x)),
+      `${packName(p)} ${p.active ? 'hidden from' : 'shown in'} the app`,
     )
-  }
 
-  const toggle = p => {
-    setConfig('coinPacks', list => list.map(x => (x.id === p.id ? { ...x, active: !x.active } : x)), [
-      `${p.active ? 'Deactivated' : 'Activated'} coin pack ${packName(p)} (${inr(p.price)})`,
-      'Coin packs',
-    ])
-    toast(`${packName(p)} ${p.active ? 'hidden from' : 'shown in'} the app`)
-  }
-
-  const save = data => {
+  const save = async data => {
+    let ok = true
     if (editing === 'new') {
       const pack = { id: `p${Date.now().toString(36)}`, ...data }
-      setConfig('coinPacks', list => [...list, pack], [
-        `Added coin pack ${packName(pack)} for ${inr(pack.price)}${pack.firstRecharge ? ' (first recharge)' : ''}`,
-        'Coin packs',
-      ])
-      toast('Coin pack created')
-    } else {
-      const changes = diff(editing, data)
-      if (changes.length) {
-        setConfig('coinPacks', list => list.map(x => (x.id === editing.id ? { ...x, ...data } : x)), [
-          `Edited coin pack ${packName(editing)}: ${changes.join(', ')}`,
-          'Coin packs',
-        ])
-        toast('Coin pack saved')
-      }
+      ok = await persist([...packs, pack], 'Coin pack created')
+    } else if (diff(editing, data).length) {
+      ok = await persist(packs.map(x => (x.id === editing.id ? { ...x, ...data } : x)), 'Coin pack saved')
     }
-    setEditing(null)
+    if (ok) setEditing(null)
   }
 
-  const remove = () => {
+  const remove = async () => {
     const p = deleting
-    setConfig('coinPacks', list => list.filter(x => x.id !== p.id), [`Deleted coin pack ${packName(p)} (${inr(p.price)})`, 'Coin packs'])
-    toast('Coin pack deleted')
     setDeleting(null)
+    await persist(packs.filter(x => x.id !== p.id), 'Coin pack deleted')
   }
 
   const columns = [

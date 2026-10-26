@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowRight, Banknote, Check, CircleCheck, Clock, Download, Hourglass, Landmark, Send, Smartphone, TriangleAlert, X } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { serverTable, useApi, usePaging } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
 import {
   Badge,
   Button,
@@ -13,6 +15,7 @@ import {
   Empty,
   Field,
   Input,
+  Loading,
   Modal,
   PageHeader,
   SearchInput,
@@ -22,14 +25,10 @@ import {
   Tabs,
   Who,
 } from '../../components/ui'
-import { ago, dateTime, exportCsv, inr, label, num, pct } from '../../utils/format'
-
-// Timestamp for admin actions; called from event handlers only.
-const stamp = () => Date.now()
+import { ago, dateTime, exportCsv, inr, label, ms, num, pct } from '../../utils/format'
 
 const DAY = 86400000
 const STATUSES = ['requested', 'processing', 'paid', 'rejected']
-const sumAmount = list => list.reduce((n, w) => n + w.amount, 0)
 
 function hours(ms) {
   const h = ms / 3600000
@@ -70,7 +69,7 @@ function TimelineItem({ on, title, sub }) {
 function PaidModal({ w, onClose, onSave }) {
   const [utr, setUtr] = useState('')
   const clean = utr.trim().toUpperCase()
-  const valid = /^[A-Z0-9-]{6,30}$/.test(clean)
+  const valid = /^[A-Z0-9]{6,30}$/.test(clean)
   return (
     <Modal
       open
@@ -98,7 +97,7 @@ function PaidModal({ w, onClose, onSave }) {
 }
 
 export default function WithdrawalsPage() {
-  const { db, me, update } = useStore()
+  const { db, refreshCounts } = useStore()
   const toast = useToast()
   const [now] = useState(() => Date.now())
   const [tab, setTab] = useState('requested')
@@ -106,84 +105,110 @@ export default function WithdrawalsPage() {
   const [kind, setKind] = useState('all')
   const [openId, setOpenId] = useState(null)
   const [modal, setModal] = useState(null) // paid | reject | approve
+  const [busy, setBusy] = useState(false)
   const { economy } = db.config
 
-  const hosts = useMemo(() => Object.fromEntries(db.hosts.map(h => [h.id, h])), [db.hosts])
-  const nameOk = w => w.method.holder === (hosts[w.hostId]?.name ?? w.hostName)
+  const pg = usePaging({ status: tab, kind, q: q.trim() || undefined }, 20)
+  const res = useApi('/admin/finance/withdrawals', pg.query)
+  const rows = res.data?.items || []
+  const totals = res.data?.totals || {}
+  const tot = st => totals[st] || { count: 0, amount: 0, net: 0 }
 
-  const base = useMemo(() => {
-    const s = q.trim().toLowerCase()
-    return db.withdrawals.filter(
-      w =>
-        (kind === 'all' || w.method.kind === kind) &&
-        (!s || [w.id, w.hostId, w.hostName, w.method.label, w.method.holder, w.utr].some(v => String(v || '').toLowerCase().includes(s))),
-    )
-  }, [db.withdrawals, q, kind])
-  const rows = base.filter(w => w.status === tab)
+  // The latest paid payouts, for "paid this week" and time-to-pay.
+  const paidRes = useApi('/admin/finance/withdrawals', { status: 'paid', limit: 100 })
+  const paidList = paidRes.data?.items || []
+  const paid7 = paidList.filter(w => w.paidAt && ms(w.paidAt) >= now - 7 * DAY)
+  const timed = paidList.filter(w => w.paidAt)
+  const avgPay = timed.length ? timed.reduce((n, w) => n + (ms(w.paidAt) - ms(w.ts)), 0) / timed.length : null
 
-  const all = db.withdrawals
-  const of = st => all.filter(w => w.status === st)
-  const paidAtOf = w => w.paidAt ?? w.ts
-  const paid7 = of('paid').filter(w => paidAtOf(w) >= now - 7 * DAY)
-  const timed = of('paid').filter(w => w.paidAt)
-  const avgPay = timed.length ? timed.reduce((n, w) => n + (w.paidAt - w.ts), 0) / timed.length : null
+  // Name check: payout account holder vs the host's name on REBU.
+  const nameOk = w => !w.method?.holder || !w.hostName || w.method.holder.trim().toLowerCase() === w.hostName.trim().toLowerCase()
 
-  const w = openId ? db.withdrawals.find(x => x.id === openId) : null
-  const host = w ? hosts[w.hostId] : null
+  const detail = useApi(openId ? `/admin/finance/withdrawals/${openId}` : null)
+  const w = openId ? detail.data?.withdrawal || rows.find(x => x.id === openId) || null : null
+  const balance = detail.data?.balance || null
+  const hostRes = useApi(w?.hostId ? `/admin/hosts/${w.hostId}` : null)
+  const host = hostRes.data?.host || null
 
-  const approve = ids => {
-    const list = db.withdrawals.filter(x => ids.includes(x.id) && x.status === 'requested')
-    list.forEach(x =>
-      update('withdrawals', x.id, { status: 'processing', approvedAt: stamp(), handledBy: me?.name }, [`Approved withdrawal ${inr(x.amount)}`, x.id]),
-    )
-    return list.length
+  const refresh = () => {
+    res.reload()
+    paidRes.reload()
+    detail.reload()
+    refreshCounts()
   }
 
-  const markPaid = utr => {
-    update('withdrawals', w.id, { status: 'paid', utr, handledBy: me?.name, paidAt: stamp() }, [`Marked withdrawal paid · UTR ${utr}`, w.id])
-    toast(`${inr(w.net)} marked paid to ${w.hostName}`)
-  }
-
-  const reject = reason => {
-    update('withdrawals', w.id, { status: 'rejected', note: reason, handledBy: me?.name, rejectedAt: stamp() }, [`Rejected withdrawal · ${reason}`, w.id])
-    if (host) {
-      update('hosts', host.id, h => ({ available: h.available + w.amount }), [`Returned ${inr(w.amount)} to balance for rejected withdrawal ${w.id}`, host.id])
+  const run = async (fn, done) => {
+    setBusy(true)
+    try {
+      const r = await fn()
+      toast(done(r))
+      refresh()
+      return true
+    } catch (e) {
+      toast(errorText(e), 'error')
+      refresh()
+      return false
+    } finally {
+      setBusy(false)
     }
-    toast(host ? `Rejected · ${inr(w.amount)} returned to ${w.hostName}’s balance` : 'Withdrawal rejected')
   }
+
+  const approveMany = ids =>
+    run(
+      () => api.post('/admin/finance/withdrawals/bulk-approve', { ids }),
+      r => `${r.approved} withdrawal${r.approved === 1 ? '' : 's'} approved · moved to processing${r.skipped ? ` · ${r.skipped} skipped` : ''}`,
+    )
+
+  const approve = () => run(() => api.post(`/admin/finance/withdrawals/${w.id}/approve`), () => 'Withdrawal approved · moved to processing')
+
+  // The API only pays from processing, so a requested one is approved first.
+  const markPaid = utr =>
+    run(
+      async () => {
+        if (w.status === 'requested') await api.post(`/admin/finance/withdrawals/${w.id}/approve`)
+        return api.post(`/admin/finance/withdrawals/${w.id}/paid`, { utr })
+      },
+      () => `${inr(w.net)} marked paid to ${w.hostName}`,
+    )
+
+  const reject = reason =>
+    run(
+      () => api.post(`/admin/finance/withdrawals/${w.id}/reject`, { reason }),
+      () => `Rejected · ${inr(w.amount)} returned to ${w.hostName}’s balance`,
+    )
 
   const columns = [
-    { key: 'id', label: 'ID', sort: x => x.id, render: x => <span className="a-mono">{x.id}</span> },
+    { key: 'id', label: 'ID', render: x => <span className="a-mono">{x.id}</span> },
     {
       key: 'host',
       label: 'Host',
-      sort: x => x.hostName,
       render: x => <Who src={x.hostAvatar} name={x.hostName} sub={x.hostId} size={32} to={`/admin/hosts/${x.hostId}`} />,
     },
-    { key: 'amount', label: 'Amount', align: 'right', sort: x => x.amount, render: x => inr(x.amount) },
-    { key: 'fee', label: 'Fee', align: 'right', sort: x => x.fee, render: x => <span className="a-muted">{inr(x.fee)}</span> },
-    { key: 'net', label: 'Net payable', align: 'right', sort: x => x.net, render: x => <b className="a-strong">{inr(x.net)}</b> },
+    { key: 'amount', label: 'Amount', align: 'right', serverSort: 'amount', render: x => inr(x.amount) },
+    { key: 'fee', label: 'Fee', align: 'right', render: x => <span className="a-muted">{inr(x.fee)}</span> },
+    { key: 'net', label: 'Net payable', align: 'right', render: x => <b className="a-strong">{inr(x.net)}</b> },
     { key: 'method', label: 'Method', render: x => <MethodCell m={x.method} /> },
-    { key: 'kyc', label: 'KYC name', sort: x => (nameOk(x) ? 1 : 0), render: x => <NameCheck ok={nameOk(x)} /> },
+    { key: 'kyc', label: 'KYC name', render: x => <NameCheck ok={nameOk(x)} /> },
     {
       key: 'ts',
       label: 'Requested',
-      sort: x => x.ts,
+      serverSort: 'ts',
       render: x => (
         <span className="a-nowrap" title={dateTime(x.ts)}>
           {ago(x.ts)}
         </span>
       ),
     },
-    { key: 'status', label: 'Status', sort: x => x.status, render: x => <Status value={x.status} /> },
+    { key: 'status', label: 'Status', render: x => <Status value={x.status} /> },
   ]
 
   const flags = w
     ? [
-        !nameOk(w) && `Account holder “${w.method.holder}” doesn’t match the host’s verified name “${host?.name ?? w.hostName}”.`,
+        !nameOk(w) && `Account holder “${w.method.holder}” doesn’t match the host’s name “${host?.name ?? w.hostName}”.`,
         w.amount < economy.minWithdraw && `Below the ${inr(economy.minWithdraw)} minimum.`,
         w.amount > economy.maxWithdrawPerDay && `Above the ${inr(economy.maxWithdrawPerDay)} daily limit.`,
         host && host.status !== 'active' && `Host account is ${host.status}.`,
+        balance && balance.onHold > 0 && `${inr(balance.onHold)} of this host’s earnings is on hold for review.`,
       ].filter(Boolean)
     : []
 
@@ -224,8 +249,8 @@ export default function WithdrawalsPage() {
       />
 
       <div className="a-grid c4">
-        <Stat label="Waiting for approval" value={inr(sumAmount(of('requested')))} sub={`${num(of('requested').length)} requests`} icon={Hourglass} />
-        <Stat label="Processing" value={inr(sumAmount(of('processing')))} sub={`${num(of('processing').length)} approved, not yet paid`} icon={Send} />
+        <Stat label="Waiting for approval" value={inr(tot('requested').amount)} sub={`${num(tot('requested').count)} requests`} icon={Hourglass} />
+        <Stat label="Processing" value={inr(tot('processing').amount)} sub={`${num(tot('processing').count)} approved, not yet paid`} icon={Send} />
         <Stat label="Paid · last 7 days" value={inr(paid7.reduce((n, x) => n + x.net, 0))} sub={`${num(paid7.length)} payouts (net)`} icon={Banknote} />
         <Stat
           label="Avg. time to pay"
@@ -256,25 +281,22 @@ export default function WithdrawalsPage() {
         <Tabs
           value={tab}
           onChange={setTab}
-          tabs={STATUSES.map(s => {
-            const list = base.filter(x => x.status === s)
-            return {
-              value: s,
-              label: (
-                <>
-                  {label(s)} <span className="a-small a-muted">· {inr(sumAmount(list))}</span>
-                </>
-              ),
-              count: list.length,
-            }
-          })}
+          tabs={STATUSES.map(s => ({
+            value: s,
+            label: (
+              <>
+                {label(s)} <span className="a-small a-muted">· {inr(tot(s).amount)}</span>
+              </>
+            ),
+            count: tot(s).count,
+          }))}
         />
         <Card padded={false}>
           <DataTable
             key={tab}
             rows={rows}
             columns={columns}
-            initialSort={{ key: 'ts', dir: tab === 'requested' ? 'asc' : 'desc' }}
+            {...serverTable(pg, res)}
             onRowClick={x => setOpenId(x.id)}
             selectable={tab === 'requested'}
             bulk={(ids, clear) => (
@@ -282,10 +304,9 @@ export default function WithdrawalsPage() {
                 size="sm"
                 variant="primary"
                 icon={Check}
-                onClick={() => {
-                  const n = approve(ids)
-                  toast(`${n} withdrawal${n === 1 ? '' : 's'} approved · moved to processing`)
-                  clear()
+                disabled={busy}
+                onClick={async () => {
+                  if (await approveMany(ids)) clear()
                 }}
               >
                 Approve
@@ -317,21 +338,22 @@ export default function WithdrawalsPage() {
         footer={
           open ? (
             <>
-              <Button variant="soft-danger" icon={X} onClick={() => setModal('reject')}>
+              <Button variant="soft-danger" icon={X} disabled={busy} onClick={() => setModal('reject')}>
                 Reject
               </Button>
               {w.status === 'requested' ? (
-                <Button icon={Check} onClick={() => setModal('approve')}>
+                <Button icon={Check} disabled={busy} onClick={() => setModal('approve')}>
                   Approve
                 </Button>
               ) : null}
-              <Button variant="primary" icon={CircleCheck} onClick={() => setModal('paid')}>
+              <Button variant="primary" icon={CircleCheck} disabled={busy} onClick={() => setModal('paid')}>
                 Mark as paid
               </Button>
             </>
           ) : null
         }
       >
+        {openId && !w ? <Loading /> : null}
         {w ? (
           <div className="a-stack" style={{ gap: 18 }}>
             <div className="a-row between">
@@ -344,7 +366,7 @@ export default function WithdrawalsPage() {
               <Status value={w.status} />
             </div>
 
-            <Who src={w.hostAvatar} name={w.hostName} sub={host ? `${w.hostId} · balance ${inr(host.available)}` : w.hostId} to={`/admin/hosts/${w.hostId}`} />
+            <Who src={w.hostAvatar} name={w.hostName} sub={balance ? `${w.hostId} · balance ${inr(balance.available)}` : w.hostId} to={`/admin/hosts/${w.hostId}`} />
 
             {flags.length ? (
               <div className="a-card" style={{ padding: 12, background: 'var(--danger-soft)', borderColor: 'transparent', boxShadow: 'none' }}>
@@ -394,14 +416,15 @@ export default function WithdrawalsPage() {
               <dd className="a-row" style={{ gap: 8 }}>
                 {w.method.holder} <NameCheck ok={nameOk(w)} />
               </dd>
-              {host ? (
+              {w.method.kind === 'upi' ? null : (
                 <>
-                  <dt>Verified ID</dt>
-                  <dd>
-                    {host.idType} ••{host.idLast4}
+                  <dt>Account</dt>
+                  <dd className="a-mono">
+                    {w.method.account || '—'}
+                    {w.method.ifsc ? ` · ${w.method.ifsc}` : ''}
                   </dd>
                 </>
-              ) : null}
+              )}
               {w.utr ? (
                 <>
                   <dt>UTR</dt>
@@ -430,8 +453,8 @@ export default function WithdrawalsPage() {
           w={w}
           onClose={() => setModal(null)}
           onSave={utr => {
-            markPaid(utr)
             setModal(null)
+            markPaid(utr)
           }}
         />
       ) : null}
@@ -442,17 +465,16 @@ export default function WithdrawalsPage() {
         confirmLabel="Approve"
         onClose={() => setModal(null)}
         onConfirm={() => {
-          approve([w.id])
-          toast('Withdrawal approved · moved to processing')
           setModal(null)
+          approve()
         }}
       />
       <Confirm
         open={modal === 'reject' && !!w}
         title="Reject withdrawal?"
         message={
-          w && host
-            ? `${inr(w.amount)} goes back to ${w.hostName}’s available balance (${inr(host.available)} → ${inr(host.available + w.amount)}). The host sees the reason in the app.`
+          w && balance
+            ? `${inr(w.amount)} goes back to ${w.hostName}’s available balance (${inr(balance.available)} → ${inr(balance.available + w.amount)}). The host sees the reason in the app.`
             : 'The host sees the reason in the app.'
         }
         confirmLabel="Reject & refund to balance"
@@ -461,8 +483,8 @@ export default function WithdrawalsPage() {
         reasonLabel="Reason (shown to the host)"
         onClose={() => setModal(null)}
         onConfirm={reason => {
-          reject(reason)
           setModal(null)
+          reject(reason)
         }}
       />
     </div>

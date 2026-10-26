@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { BadgeCheck, Ban, Download, RotateCcw, ShieldOff } from 'lucide-react'
-import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
-import { Badge, Button, Card, Confirm, DataTable, PageHeader, SearchInput, Seg, Select, Status, Who } from '../../components/ui'
+import { serverTable, useApi, usePaging } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
+import { Badge, Button, Card, Confirm, DataTable, PageHeader, SearchInput, Seg, Select, Status, Tabs, Who } from '../../components/ui'
 import { ago, date, exportCsv, inr, num } from '../../utils/format'
 
 const STATUS = [
@@ -13,63 +14,105 @@ const STATUS = [
   { value: 'banned', label: 'Banned' },
 ]
 
+/** Value that follows `value` after it stops changing for `delay` ms. */
+function useDebounced(value, delay = 300) {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), delay)
+    return () => clearTimeout(t)
+  }, [value, delay])
+  return v
+}
+
+const total = res => res.data?.total ?? 0
+
 export default function UsersPage() {
-  const { db, update, log } = useStore()
   const toast = useToast()
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const [q, setQ] = useState(params.get('q') || '')
   const [status, setStatus] = useState('all')
+  // 'all' | 'verification' (pending blue-tick requests)
+  const [view, setView] = useState(() => (params.get('view') === 'verification' ? 'verification' : 'all'))
   const [vip, setVip] = useState('any')
   const [device, setDevice] = useState('any')
   const [paying, setPaying] = useState('any')
   const [confirm, setConfirm] = useState(null) // { action, ids, clear }
+  const term = useDebounced(q.trim())
 
-  const rows = useMemo(() => {
-    const t = q.trim().toLowerCase()
-    return db.users.filter(
-      u =>
-        (status === 'all' || u.status === status) &&
-        (vip === 'any' || (vip === 'vip' ? u.vip > 0 : u.vip === 0)) &&
-        (device === 'any' || u.device === device) &&
-        (paying === 'any' || (paying === 'paying' ? u.spent > 0 : u.spent === 0)) &&
-        (!t || [u.name, u.id, u.phone, u.email, u.city].some(v => String(v).toLowerCase().includes(t))),
-    )
-  }, [db.users, q, status, vip, device, paying])
+  const filters = {
+    q: term || undefined,
+    status: status === 'all' ? undefined : status,
+    vip: vip === 'any' ? undefined : vip === 'vip' ? 'vip' : '0',
+    device: device === 'any' ? undefined : device,
+    paying: paying === 'any' ? undefined : paying === 'paying' ? 'yes' : 'no',
+    verification: view === 'verification' ? 'pending' : undefined,
+  }
+  const pg = usePaging(filters, 20, { key: 'joined', dir: 'desc' })
+  const res = useApi('/admin/users', pg.query)
+  const rows = res.data?.items
 
-  const counts = useMemo(
-    () => ({
-      total: db.users.length,
-      paying: db.users.filter(u => u.spent > 0).length,
-      vip: db.users.filter(u => u.vip > 0).length,
-      blocked: db.users.filter(u => u.status !== 'active').length,
-    }),
-    [db.users],
-  )
+  // Header counts (one-row queries; the server only returns totals per filter).
+  const all = useApi('/admin/users', { limit: 1 })
+  const payingN = useApi('/admin/users', { limit: 1, paying: 'yes' })
+  const vipN = useApi('/admin/users', { limit: 1, vip: 'vip' })
+  const suspN = useApi('/admin/users', { limit: 1, status: 'suspended' })
+  const banN = useApi('/admin/users', { limit: 1, status: 'banned' })
+  const pendingN = useApi('/admin/users', { limit: 1, verification: 'pending' })
+  const reloadAll = () => [res, all, suspN, banN, pendingN].forEach(r => r.reload())
 
-  const apply = (action, ids, reason) => {
+  const apply = async (action, ids, reason) => {
     const next = { suspend: 'suspended', ban: 'banned', activate: 'active' }[action]
-    ids.forEach(id => update('users', id, { status: next, statusReason: reason || '' }))
-    log(`${action === 'activate' ? 'Reactivated' : action === 'ban' ? 'Banned' : 'Suspended'} ${ids.length} user(s)${reason ? ` — ${reason}` : ''}`, ids.join(', '))
-    toast(`${ids.length} user${ids.length > 1 ? 's' : ''} ${next}`)
+    try {
+      const r = await api.post('/admin/users/bulk-status', { ids, status: next, reason: reason || undefined })
+      toast(`${r.updated} user${r.updated === 1 ? '' : 's'} ${next}`)
+    } catch (e) {
+      toast(errorText(e), 'error')
+    }
+    reloadAll()
+  }
+
+  const exportAll = async () => {
+    try {
+      const out = []
+      for (let page = 1; page <= 50; page += 1) {
+        const r = await api.get('/admin/users', { ...filters, page, limit: 100 })
+        out.push(...r.items)
+        if (page >= r.pages) break
+      }
+      exportCsv('rebu-users.csv', out, [
+        { label: 'ID', value: u => u.id },
+        { label: 'Name', value: u => u.name },
+        { label: 'Phone', value: u => u.phone },
+        { label: 'Email', value: u => u.email },
+        { label: 'City', value: u => u.city },
+        { label: 'Joined', value: u => date(u.joined) },
+        { label: 'Coins', value: u => u.coins },
+        { label: 'Spent (INR)', value: u => u.spent },
+        { label: 'VIP', value: u => u.vip },
+        { label: 'Status', value: u => u.status },
+      ])
+    } catch (e) {
+      toast(errorText(e), 'error')
+    }
   }
 
   const columns = [
-    { key: 'name', label: 'User', sort: u => u.name, render: u => <Who src={u.avatar} name={u.name} sub={`${u.id} · ${u.city}`} /> },
+    { key: 'name', label: 'User', serverSort: 'name', render: u => <Who src={u.avatar} name={u.name || 'Unnamed'} sub={[u.id, u.city].filter(Boolean).join(' · ')} /> },
     { key: 'phone', label: 'Phone', render: u => <span className="a-nowrap">{u.phone}</span> },
-    { key: 'joined', label: 'Joined', sort: u => u.joined, render: u => <span className="a-nowrap">{date(u.joined)}</span> },
-    { key: 'lastActive', label: 'Last active', sort: u => u.lastActive, render: u => <span className="a-muted a-nowrap">{ago(u.lastActive)}</span> },
-    { key: 'coins', label: 'Coins', align: 'right', sort: u => u.coins, render: u => num(u.coins) },
-    { key: 'spent', label: 'Spent', align: 'right', sort: u => u.spent, render: u => <b className="a-strong">{inr(u.spent)}</b> },
-    { key: 'vip', label: 'VIP', sort: u => u.vip, render: u => (u.vip ? <Badge tone="warning">{u.vip >= 4 ? 'Elite' : `VIP ${u.vip}`}</Badge> : <span className="a-faint">—</span>) },
+    { key: 'joined', label: 'Joined', serverSort: 'joined', render: u => <span className="a-nowrap">{date(u.joined)}</span> },
+    { key: 'lastActive', label: 'Last active', serverSort: 'lastActive', render: u => <span className="a-muted a-nowrap">{ago(u.lastActive)}</span> },
+    { key: 'coins', label: 'Coins', align: 'right', serverSort: 'coins', render: u => num(u.coins) },
+    { key: 'spent', label: 'Spent', align: 'right', serverSort: 'spent', render: u => <b className="a-strong">{inr(u.spent)}</b> },
+    { key: 'vip', label: 'VIP', render: u => (u.vip ? <Badge tone="warning">{u.vip >= 4 ? 'Elite' : `VIP ${u.vip}`}</Badge> : <span className="a-faint">—</span>) },
     {
       key: 'status',
       label: 'Status',
-      sort: u => u.status,
       render: u => (
         <span className="a-row" style={{ gap: 6 }}>
           <Status value={u.status} />
           {u.verified ? <BadgeCheck size={16} color="var(--info)" aria-label="Verified" /> : null}
+          {u.verification?.status === 'pending' ? <Badge tone="info">Tick requested</Badge> : null}
         </span>
       ),
     },
@@ -79,35 +122,35 @@ export default function UsersPage() {
     <>
       <PageHeader
         title="Users"
-        subtitle={`${num(counts.total)} users · ${num(counts.paying)} paying · ${num(counts.vip)} VIP · ${num(counts.blocked)} suspended or banned`}
+        subtitle={`${num(total(all))} users · ${num(total(payingN))} paying · ${num(total(vipN))} VIP · ${num(total(suspN) + total(banN))} suspended or banned`}
         actions={
-          <Button
-            icon={Download}
-            onClick={() =>
-              exportCsv('rebu-users.csv', rows, [
-                { label: 'ID', value: u => u.id },
-                { label: 'Name', value: u => u.name },
-                { label: 'Phone', value: u => u.phone },
-                { label: 'Email', value: u => u.email },
-                { label: 'City', value: u => u.city },
-                { label: 'Joined', value: u => date(u.joined) },
-                { label: 'Coins', value: u => u.coins },
-                { label: 'Spent (INR)', value: u => u.spent },
-                { label: 'VIP', value: u => u.vip },
-                { label: 'Status', value: u => u.status },
-              ])
-            }
-          >
+          <Button icon={Download} onClick={exportAll}>
             Export CSV
           </Button>
         }
+      />
+      <Tabs
+        value={view}
+        onChange={v => {
+          setView(v)
+          setParams(p => {
+            const n = new URLSearchParams(p)
+            if (v === 'verification') n.set('view', v)
+            else n.delete('view')
+            return n
+          }, { replace: true })
+        }}
+        tabs={[
+          { value: 'all', label: 'All users' },
+          { value: 'verification', label: 'Verification requests', count: total(pendingN) },
+        ]}
       />
       <Card padded={false}>
         <DataTable
           rows={rows}
           columns={columns}
+          {...serverTable(pg, res)}
           onRowClick={u => navigate(`/admin/users/${u.id}`)}
-          initialSort={{ key: 'joined', dir: 'desc' }}
           selectable
           bulk={(ids, clear) => (
             <>
@@ -128,9 +171,14 @@ export default function UsersPage() {
                 value={q}
                 onChange={v => {
                   setQ(v)
-                  setParams(v ? { q: v } : {}, { replace: true })
+                  setParams(p => {
+                    const n = new URLSearchParams(p)
+                    if (v) n.set('q', v)
+                    else n.delete('q')
+                    return n
+                  }, { replace: true })
                 }}
-                placeholder="Name, ID, phone, email, city"
+                placeholder="Name, ID, phone, email"
               />
               <Seg options={STATUS} value={status} onChange={setStatus} />
               <Select

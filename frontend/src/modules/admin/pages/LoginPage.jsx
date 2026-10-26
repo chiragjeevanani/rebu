@@ -4,16 +4,35 @@ import { useStore } from '../hooks/useStore'
 import { ROLES } from '../routes/nav'
 import { Button, Field, Input } from '../components/ui'
 
+// Dev-only shortcuts for the accounts backend/scripts/seed.js creates.
+const DEMO_ADMINS = import.meta.env.DEV
+  ? [
+      { role: 'super_admin', email: 'admin@rebu.app', password: 'admin123' },
+      { role: 'moderator', email: 'priya@rebu.app', password: 'mod123' },
+      { role: 'finance', email: 'neha@rebu.app', password: 'finance123' },
+      { role: 'support', email: 'rohit@rebu.app', password: 'support123' },
+    ]
+  : []
+
 export default function LoginPage() {
-  const { db, login } = useStore()
+  const { login } = useStore()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [show, setShow] = useState(false)
   const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(false)
 
-  const submit = e => {
+  const submit = async e => {
     e.preventDefault()
-    setError(login(email, password))
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    const err = await login(email, password)
+    // On success this page unmounts as the routes switch to the console.
+    if (err) {
+      setError(err)
+      setBusy(false)
+    }
   }
 
   return (
@@ -66,31 +85,33 @@ export default function LoginPage() {
               </button>
             </span>
           </Field>
-          <Button type="submit" variant="primary" size="lg" block>
-            Sign in
+          <Button type="submit" variant="primary" size="lg" block disabled={busy}>
+            {busy ? 'Signing in…' : 'Sign in'}
           </Button>
 
-          <div className="a-card" style={{ padding: 14, background: 'var(--surface-2)', boxShadow: 'none' }}>
-            <div className="a-label" style={{ marginBottom: 8 }}>
-              Demo accounts (test build)
+          {DEMO_ADMINS.length ? (
+            <div className="a-card" style={{ padding: 14, background: 'var(--surface-2)', boxShadow: 'none' }}>
+              <div className="a-label" style={{ marginBottom: 8 }}>
+                Demo accounts (test build)
+              </div>
+              {DEMO_ADMINS.map(a => (
+                <button
+                  key={a.email}
+                  type="button"
+                  className="a-btn ghost block"
+                  style={{ justifyContent: 'space-between', height: 32 }}
+                  onClick={() => {
+                    setEmail(a.email)
+                    setPassword(a.password)
+                    setError(null)
+                  }}
+                >
+                  <span>{ROLES[a.role]?.label}</span>
+                  <span className="a-mono a-muted">{a.email}</span>
+                </button>
+              ))}
             </div>
-            {db.admins.slice(0, 4).map(a => (
-              <button
-                key={a.id}
-                type="button"
-                className="a-btn ghost block"
-                style={{ justifyContent: 'space-between', height: 32 }}
-                onClick={() => {
-                  setEmail(a.email)
-                  setPassword(a.password)
-                  setError(null)
-                }}
-              >
-                <span>{ROLES[a.role]?.label}</span>
-                <span className="a-mono a-muted">{a.email}</span>
-              </button>
-            ))}
-          </div>
+          ) : null}
         </form>
       </div>
     </div>

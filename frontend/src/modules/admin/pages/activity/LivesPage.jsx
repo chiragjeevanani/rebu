@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AlertTriangle, Eye, Gem, Info, Mic, Radio, Ticket, Users, Video, XCircle } from 'lucide-react'
-import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { serverTable, useAdminEvent, useApi, usePaging } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
 import {
   Badge,
   Button,
@@ -10,7 +11,9 @@ import {
   DataTable,
   Drawer,
   Empty,
+  ErrorState,
   Field,
+  Loading,
   Modal,
   PageHeader,
   Seg,
@@ -20,7 +23,9 @@ import {
   Textarea,
   Who,
 } from '../../components/ui'
-import { compact, dateTime, duration, num } from '../../utils/format'
+import { compact, dateTime, duration, label, ms, num } from '../../utils/format'
+
+const LIVE_EVENTS = ['live:started', 'live:ended']
 
 const MODES = [
   { value: 'all', label: 'All' },
@@ -45,7 +50,8 @@ function useNow(ms = 30000) {
   return now
 }
 
-const elapsed = (l, now) => Math.max(0, Math.round(((l.endedAt || now) - l.startedAt) / 1000))
+const elapsed = (l, now) => Math.max(0, Math.round(((l.endedAt ? ms(l.endedAt) : now) - ms(l.startedAt)) / 1000))
+const guestCount = l => (Array.isArray(l.guests) ? l.guests.length : l.guests || 0)
 
 function ModeBadge({ mode, ticket }) {
   const m = MODE_META[mode] || MODE_META.live
@@ -67,7 +73,7 @@ function LiveCard({ l, now, onOpen, onWarn, onEnd }) {
         style={{ position: 'relative', padding: 0, border: 0, background: 'var(--surface-2)', cursor: 'pointer', display: 'block' }}
         aria-label={`Open ${l.title}`}
       >
-        {l.mode === 'audio' ? (
+        {l.mode === 'audio' || !l.cover ? (
           <div style={{ aspectRatio: '4 / 3', display: 'grid', placeItems: 'center', color: 'var(--muted)' }}>
             <Mic size={40} />
           </div>
@@ -114,9 +120,9 @@ function LiveCard({ l, now, onOpen, onWarn, onEnd }) {
           <span className="a-row" style={{ gap: 4 }}>
             <Gem size={13} /> {compact(l.diamonds)}
           </span>
-          {l.guests ? (
+          {guestCount(l) ? (
             <span className="a-row" style={{ gap: 4 }}>
-              <Users size={13} /> {l.guests}
+              <Users size={13} /> {guestCount(l)}
             </span>
           ) : null}
         </span>
@@ -126,7 +132,7 @@ function LiveCard({ l, now, onOpen, onWarn, onEnd }) {
           <Icon size={15} className="a-muted" style={{ flexShrink: 0 }} />
           <b className="a-strong" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.title}</b>
         </div>
-        <Who src={l.hostAvatar} name={l.hostName} sub={`${l.hostId} · ${l.id}`} size={32} to={`/admin/hosts/${l.hostId}`} />
+        <Who src={l.hostAvatar} name={l.hostName || 'Host'} sub={`Live ${l.id.slice(-8)}`} size={32} to={`/admin/hosts/${l.hostId}`} />
         <div className="a-row" style={{ gap: 6, marginTop: 'auto' }}>
           <Button size="sm" icon={Info} onClick={onOpen}>
             Details
@@ -148,7 +154,7 @@ function WarnModal({ live, onClose, onSend }) {
   return (
     <Modal
       open
-      title={`Warn ${live.hostName}`}
+      title={`Warn ${live.hostName || 'host'}`}
       onClose={onClose}
       footer={
         <>
@@ -170,7 +176,6 @@ function WarnModal({ live, onClose, onSend }) {
 }
 
 export default function LivesPage() {
-  const { db, update, log } = useStore()
   const toast = useToast()
   const now = useNow()
   const [tab, setTab] = useState('now')
@@ -179,32 +184,41 @@ export default function LivesPage() {
   const [warnId, setWarnId] = useState(null)
   const [endId, setEndId] = useState(null)
 
-  const byMode = useMemo(() => db.lives.filter(l => mode === 'all' || l.mode === mode), [db.lives, mode])
-  const current = useMemo(() => byMode.filter(l => l.status === 'live').sort((a, b) => b.viewers - a.viewers), [byMode])
-  const history = useMemo(() => byMode.filter(l => l.status !== 'live'), [byMode])
+  const modeQ = mode === 'all' ? undefined : mode
+  // Everything live now (one page is plenty) for the cards and stats, plus paged history.
+  const allRes = useApi('/admin/lives', { tab: 'now', sort: 'viewers', dir: 'desc', limit: 100 })
+  const pg = usePaging({ tab: 'history', mode: modeQ }, 20)
+  const histRes = useApi(tab === 'history' ? '/admin/lives' : null, pg.query)
+  const reloadAll = () => {
+    allRes.reload()
+    if (tab === 'history') histRes.reload()
+  }
+  useAdminEvent(LIVE_EVENTS, reloadAll)
 
-  const allLive = db.lives.filter(l => l.status === 'live')
+  const allLive = allRes.data?.items || []
+  const current = allLive.filter(l => mode === 'all' || l.mode === mode)
+  const history = histRes.data?.items || []
   const stats = {
-    live: allLive.length,
-    viewers: allLive.reduce((n, l) => n + l.viewers, 0),
-    diamonds: allLive.reduce((n, l) => n + l.diamonds, 0),
+    live: allRes.data?.stats?.live ?? allLive.length,
+    viewers: allLive.reduce((n, l) => n + (l.viewers || 0), 0),
+    diamonds: allLive.reduce((n, l) => n + (l.diamonds || 0), 0),
     premium: allLive.filter(l => l.mode === 'premium').length,
   }
 
-  const find = id => (id ? db.lives.find(l => l.id === id) : null)
+  const find = id => (id ? allLive.find(l => l.id === id) || history.find(l => l.id === id) || null : null)
   const open = find(openId)
   const warn = find(warnId)
   const ending = find(endId)
 
   const columns = [
-    { key: 'host', label: 'Host', sort: l => l.hostName, render: l => <Who src={l.hostAvatar} name={l.hostName} sub={l.id} size={32} to={`/admin/hosts/${l.hostId}`} /> },
+    { key: 'host', label: 'Host', render: l => <Who src={l.hostAvatar} name={l.hostName || 'Host'} sub={l.id.slice(-8)} size={32} to={`/admin/hosts/${l.hostId}`} /> },
     { key: 'title', label: 'Title', render: l => <span className="a-strong">{l.title}</span> },
-    { key: 'mode', label: 'Mode', sort: l => l.mode, render: l => <ModeBadge mode={l.mode} ticket={l.ticket} /> },
-    { key: 'startedAt', label: 'Started', sort: l => l.startedAt, render: l => <span className="a-nowrap">{dateTime(l.startedAt)}</span> },
-    { key: 'duration', label: 'Duration', align: 'right', sort: l => elapsed(l, now), render: l => duration(elapsed(l, now)) },
-    { key: 'peak', label: 'Peak viewers', align: 'right', sort: l => l.peak, render: l => num(l.peak) },
-    { key: 'diamonds', label: 'Diamonds', align: 'right', sort: l => l.diamonds, render: l => <b className="a-strong">{num(l.diamonds)}</b> },
-    { key: 'status', label: 'Status', sort: l => l.status, render: l => <Status value={l.status} /> },
+    { key: 'mode', label: 'Mode', render: l => <ModeBadge mode={l.mode} ticket={l.ticket} /> },
+    { key: 'startedAt', label: 'Started', serverSort: 'started', render: l => <span className="a-nowrap">{dateTime(l.startedAt)}</span> },
+    { key: 'duration', label: 'Duration', align: 'right', render: l => duration(elapsed(l, now)) },
+    { key: 'peak', label: 'Peak viewers', align: 'right', serverSort: 'peak', render: l => num(l.peak) },
+    { key: 'diamonds', label: 'Diamonds', align: 'right', render: l => <b className="a-strong">{num(l.diamonds)}</b> },
+    { key: 'status', label: 'Status', render: l => <Status value={l.status} /> },
   ]
 
   return (
@@ -224,7 +238,7 @@ export default function LivesPage() {
           onChange={setTab}
           tabs={[
             { value: 'now', label: 'Live now', count: current.length },
-            { value: 'history', label: 'History', count: history.length },
+            { value: 'history', label: 'History', count: histRes.data?.total },
           ]}
         />
         <div style={{ marginBottom: 18 }}>
@@ -233,7 +247,15 @@ export default function LivesPage() {
       </div>
 
       {tab === 'now' ? (
-        current.length ? (
+        allRes.error && !allRes.data ? (
+          <Card>
+            <ErrorState error={allRes.error} onRetry={allRes.reload} />
+          </Card>
+        ) : !allRes.data ? (
+          <Card>
+            <Loading />
+          </Card>
+        ) : current.length ? (
           <div style={{ display: 'grid', gap: 16, gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {current.map(l => (
               <LiveCard key={l.id} l={l} now={now} onOpen={() => setOpenId(l.id)} onWarn={() => setWarnId(l.id)} onEnd={() => setEndId(l.id)} />
@@ -249,7 +271,7 @@ export default function LivesPage() {
           <DataTable
             rows={history}
             columns={columns}
-            initialSort={{ key: 'startedAt', dir: 'desc' }}
+            {...serverTable(pg, histRes)}
             onRowClick={l => setOpenId(l.id)}
             empty={<Empty icon={Radio} title="No past streams" />}
           />
@@ -275,12 +297,12 @@ export default function LivesPage() {
           }
         >
           <div className="a-stack">
-            {open.mode !== 'audio' ? <img src={open.cover} alt="" className="a-thumb" style={{ width: '100%', aspectRatio: '16 / 10' }} /> : null}
+            {open.mode !== 'audio' && open.cover ? <img src={open.cover} alt="" className="a-thumb" style={{ width: '100%', aspectRatio: '16 / 10' }} /> : null}
             <div className="a-row wrap" style={{ gap: 8 }}>
               <Status value={open.status} />
               <ModeBadge mode={open.mode} ticket={open.ticket} />
             </div>
-            <Who src={open.hostAvatar} name={open.hostName} sub={open.hostId} to={`/admin/hosts/${open.hostId}`} />
+            <Who src={open.hostAvatar} name={open.hostName || 'Host'} sub={open.hostId} to={`/admin/hosts/${open.hostId}`} />
             <dl className="a-dl">
               <dt>Stream ID</dt>
               <dd className="a-mono">{open.id}</dd>
@@ -305,17 +327,26 @@ export default function LivesPage() {
               <dt>Diamonds</dt>
               <dd>{num(open.diamonds)}</dd>
               <dt>Guests</dt>
-              <dd>{open.guests || '—'}</dd>
+              <dd>{guestCount(open) || '—'}</dd>
               {open.mode === 'premium' ? (
                 <>
                   <dt>Ticket</dt>
                   <dd>{num(open.ticket)} coins</dd>
                 </>
               ) : null}
-              {open.removedReason ? (
+              {open.endReason ? (
                 <>
-                  <dt>Removed because</dt>
-                  <dd className="a-danger">{open.removedReason}</dd>
+                  <dt>{open.status === 'removed' ? 'Removed because' : 'End reason'}</dt>
+                  <dd className={open.status === 'removed' ? 'a-danger' : undefined}>
+                    {label(open.endReason)}
+                    {open.endedBy ? ` · by ${open.endedBy}` : ''}
+                  </dd>
+                </>
+              ) : null}
+              {open.warnings?.length ? (
+                <>
+                  <dt>Warnings</dt>
+                  <dd>{open.warnings.map(w => w.message).join(' · ')}</dd>
                 </>
               ) : null}
             </dl>
@@ -327,10 +358,15 @@ export default function LivesPage() {
         <WarnModal
           live={warn}
           onClose={() => setWarnId(null)}
-          onSend={text => {
-            log(`Warned host during live ${warn.id} — ${text}`, warn.hostId)
-            toast(`Warning sent to ${warn.hostName}`)
-            setWarnId(null)
+          onSend={async text => {
+            try {
+              await api.post(`/admin/lives/${warn.id}/warn`, { message: text })
+              toast(`Warning sent to ${warn.hostName || 'the host'}`)
+              setWarnId(null)
+              reloadAll()
+            } catch (e) {
+              toast(errorText(e), 'error')
+            }
           }}
         />
       ) : null}
@@ -338,15 +374,21 @@ export default function LivesPage() {
       <Confirm
         open={!!ending}
         title="End this stream?"
-        message={`${ending?.hostName}’s stream is stopped for all ${num(ending?.viewers)} viewers and marked as removed.`}
+        message={`${ending?.hostName || 'This host'}’s stream is stopped for all ${num(ending?.viewers)} viewers and marked as removed.`}
         confirmLabel="End stream"
         danger
         reason
         onClose={() => setEndId(null)}
-        onConfirm={reason => {
-          update('lives', ending.id, { status: 'removed', endedAt: Date.now(), viewers: 0, removedReason: reason }, [`Ended live stream — ${reason}`, ending.id])
-          toast('Stream ended')
+        onConfirm={async reason => {
+          const id = ending.id
           setEndId(null)
+          try {
+            await api.post(`/admin/lives/${id}/end`, { reason })
+            toast('Stream ended')
+          } catch (e) {
+            toast(errorText(e), 'error')
+          }
+          reloadAll()
         }}
       />
     </>

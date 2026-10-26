@@ -18,6 +18,13 @@ import Input from '../../components/Input';
 import Button from '../../components/Button';
 import Chip from '../../components/Chip';
 import PhotoSourceSheet from '../../components/PhotoSourceSheet';
+import { patch, setToken } from '../../api/client';
+
+// 'DD / MM / YYYY' (any separators) → '2001-04-23'
+const toIsoDate = v => {
+  const [d, m, y] = v.split(/[^0-9]+/).filter(Boolean);
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+};
 
 // Short sign-up: users only need a name, birthday, gender and a photo.
 const STEPS = ['basics', 'photos'];
@@ -38,8 +45,10 @@ const SLOT_POS = [
   { left: col(2), top: row(2) },
 ];
 
-export default function ProfileSetupScreen({ navigation }) {
-  const { signIn, completeProfile, setUser, user } = useApp();
+export default function ProfileSetupScreen({ navigation, route }) {
+  const { startSession } = useApp();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
   const [step, setStep] = useState(0);
   const [form, setForm] = useState({
     name: '',
@@ -57,14 +66,28 @@ export default function ProfileSetupScreen({ navigation }) {
 
   const next = () => {
     if (step < STEPS.length - 1) return setStep(step + 1);
-    setUser({
-      ...user,
-      name: form.name || user.name,
-      gender: form.gender,
-      photos: form.photos.length ? form.photos : user.photos,
-    });
-    completeProfile();
-    signIn();
+    save();
+  };
+
+  const save = async () => {
+    const { token } = route.params || {};
+    setSaving(true);
+    setError('');
+    try {
+      // Profile calls need the new token before the session starts.
+      await setToken(token);
+      const { user: u } = await patch('/me', {
+        name: form.name.trim(),
+        gender: { Man: 'Male', Woman: 'Female' }[form.gender] || 'Other',
+        dob: toIsoDate(form.dob),
+        photos: form.photos,
+      });
+      await startSession(token, u);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const [picker, setPicker] = useState(false);
@@ -200,9 +223,20 @@ export default function ProfileSetupScreen({ navigation }) {
       </ScrollView>
 
       <View style={styles.footer}>
+        {error ? (
+          <Txt
+            variant="small"
+            color={colors.danger}
+            center
+            style={styles.error}
+          >
+            {error}
+          </Txt>
+        ) : null}
         <Button
           title={key === 'photos' ? 'Finish' : 'Continue'}
           disabled={!canNext}
+          loading={saving}
           onPress={next}
         />
       </View>
@@ -216,6 +250,7 @@ export default function ProfileSetupScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
+  error: { marginBottom: 10 },
   progress: {
     flexDirection: 'row',
     gap: 6,

@@ -1,9 +1,9 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
-import { Lock } from 'lucide-react'
+import { CloudOff, Loader2, Lock } from 'lucide-react'
 import { useStore } from '../hooks/useStore'
 import { canAccess } from './nav'
 import Layout from '../components/Layout'
-import { Empty } from '../components/ui'
+import { Button, Empty } from '../components/ui'
 
 import LoginPage from '../pages/LoginPage'
 import DashboardPage from '../pages/DashboardPage'
@@ -28,6 +28,7 @@ import CoinPacksPage from '../pages/monetization/CoinPacksPage'
 import GiftsPage from '../pages/monetization/GiftsPage'
 import HostLevelsPage from '../pages/monetization/HostLevelsPage'
 import VipPage from '../pages/monetization/VipPage'
+import StoreTasksPage from '../pages/monetization/StoreTasksPage'
 import BannersPage from '../pages/content/BannersPage'
 import NotificationsPage from '../pages/content/NotificationsPage'
 import PagesPage from '../pages/content/PagesPage'
@@ -48,8 +49,38 @@ function Guard({ section, children }) {
 
 const g = (section, el) => <Guard section={section}>{el}</Guard>
 
+function Splash({ children }) {
+  return (
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: 'var(--bg)' }}>
+      <div className="a-card" style={{ minWidth: 320 }}>
+        {children}
+      </div>
+    </div>
+  )
+}
+
 export default function AdminRoutes() {
-  const { me } = useStore()
+  const { me, auth, bootError, retryBoot, logout } = useStore()
+
+  if (auth === 'checking') {
+    return (
+      <Splash>
+        {bootError ? (
+          <div className="a-stack" style={{ alignItems: 'center', paddingBottom: 18 }}>
+            <Empty icon={CloudOff} title="Can’t load the admin console" text={bootError} />
+            <div className="a-row">
+              <Button onClick={logout}>Sign out</Button>
+              <Button variant="primary" onClick={retryBoot}>
+                Try again
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <Empty icon={Loader2} title="Loading…" text="Signing you in to the REBU admin console." />
+        )}
+      </Splash>
+    )
+  }
 
   if (!me) {
     return (
@@ -86,6 +117,7 @@ export default function AdminRoutes() {
         <Route path="monetization/gifts" element={g('monetization', <GiftsPage />)} />
         <Route path="monetization/host-levels" element={g('monetization', <HostLevelsPage />)} />
         <Route path="monetization/vip" element={g('monetization', <VipPage />)} />
+        <Route path="monetization/store" element={g('monetization', <StoreTasksPage />)} />
         <Route path="content/banners" element={g('content', <BannersPage />)} />
         <Route path="content/notifications" element={g('content', <NotificationsPage />)} />
         <Route path="content/pages" element={g('content', <PagesPage />)} />

@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AlertTriangle, Ban, CheckCircle2, Flag, ShieldOff, Trash2, XCircle } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
+import { serverTable, useAdminEvent, useApi, usePaging } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
 import {
   Badge,
   Button,
@@ -20,15 +22,14 @@ import {
 } from '../../components/ui'
 import { ago, dateTime, label, num } from '../../utils/format'
 
-const RANK = { high: 0, medium: 1, low: 2 }
-const TYPE_TONE = { user: 'info', host: 'brand', moment: 'violet', live: 'warning', room: 'warning' }
-const DAY = 86400000
-// Read the clock in event handlers only (kept out of render for the purity lint).
-const stamp = () => Date.now()
+const TYPE_TONE = { user: 'info', host: 'brand', moment: 'violet', live: 'warning', room: 'warning', message: 'neutral' }
+const REPORT_EVENTS = ['report:new']
 
 const targetLink = t => (t.type === 'user' ? `/admin/users/${t.id}` : t.type === 'host' ? `/admin/hosts/${t.id}` : null)
 const isAccount = t => t.type === 'user' || t.type === 'host'
-const isContent = t => t.type === 'moment' || t.type === 'live' || t.type === 'room'
+const isContent = t => t.type === 'moment' || t.type === 'live' || t.type === 'room' || t.type === 'message'
+// Warn / suspend / ban land on the account, or on the owner of reported content.
+const hasAccount = t => isAccount(t) || !!t.owner
 
 // Every action resolves the report; `apply` handles the side effect on the target.
 const ACTIONS = {
@@ -46,7 +47,7 @@ const ACTIONS = {
     status: 'resolved',
     text: () => 'Warned',
     title: 'Send a warning?',
-    message: r => `${r.target.type === 'user' ? 'The user' : 'The host'} gets an in-app warning about this report. Write the message they’ll see.`,
+    message: r => `${r.target.type === 'user' ? 'The user' : r.target.type === 'host' ? 'The host' : 'The owner'} gets an in-app warning about this report. Write the message they’ll see.`,
     reason: 'Warning message',
   },
   remove: {
@@ -55,7 +56,12 @@ const ACTIONS = {
     status: 'resolved',
     text: () => 'Content removed',
     title: 'Remove this content?',
-    message: r => (r.target.type === 'moment' ? 'The moment is hidden from every feed.' : 'The stream is ended now and marked as removed.'),
+    message: r =>
+      r.target.type === 'moment'
+        ? 'The moment is hidden from every feed.'
+        : r.target.type === 'message'
+          ? 'The message is removed from the chat.'
+          : 'The stream is ended now and marked as removed.',
     reason: 'Reason',
     danger: true,
   },
@@ -65,7 +71,7 @@ const ACTIONS = {
     status: 'resolved',
     text: () => 'Suspended 7 days',
     title: 'Suspend for 7 days?',
-    message: r => `${r.target.name} is signed out and can’t use REBU for 7 days.`,
+    message: r => `${isAccount(r.target) ? r.target.name || 'This account' : 'The owner of this content'} is signed out and can’t use REBU for 7 days.`,
     reason: 'Reason (sent to them)',
     danger: true,
   },
@@ -75,25 +81,25 @@ const ACTIONS = {
     status: 'resolved',
     text: () => 'Banned',
     title: 'Ban permanently?',
-    message: r => `${r.target.name} is signed out and can’t come back with this phone number.`,
+    message: r => `${isAccount(r.target) ? r.target.name || 'This account' : 'The owner of this content'} is signed out and can’t come back with this phone number.`,
     reason: 'Reason (sent to them)',
     danger: true,
   },
 }
 
-const available = r => ['dismiss', 'warn', ...(isContent(r.target) ? ['remove'] : []), ...(isAccount(r.target) ? ['suspend', 'ban'] : [])]
+const available = r => ['dismiss', ...(hasAccount(r.target) ? ['warn'] : []), ...(isContent(r.target) ? ['remove'] : []), ...(hasAccount(r.target) ? ['suspend', 'ban'] : [])]
 
 function Target({ t, size = 32 }) {
   return (
     <div className="a-row" style={{ gap: 8, minWidth: 0 }}>
-      <Who src={t.avatar} name={t.name} sub={t.id} size={size} to={targetLink(t)} />
+      <Who src={t.avatar} name={t.name || label(t.type)} sub={t.id} size={size} to={targetLink(t)} />
       <Badge tone={TYPE_TONE[t.type]}>{label(t.type)}</Badge>
     </div>
   )
 }
 
 export default function ReportsPage() {
-  const { db, me, update } = useStore()
+  const { refreshCounts } = useStore()
   const toast = useToast()
   const [tab, setTab] = useState('open')
   const [priority, setPriority] = useState('all')
@@ -102,93 +108,56 @@ export default function ReportsPage() {
   const [openId, setOpenId] = useState(null)
   const [pending, setPending] = useState(null) // action key
 
-  const filtered = useMemo(() => {
-    const t = q.trim().toLowerCase()
-    return db.reports.filter(
-      r =>
-        (priority === 'all' || r.priority === priority) &&
-        (type === 'all' || r.target.type === type) &&
-        (!t || [r.id, r.reason, r.target.name, r.target.id, r.reporter.name, r.reporter.id].some(v => String(v).toLowerCase().includes(t))),
-    )
-  }, [db.reports, priority, type, q])
+  // The server orders the open queue high priority first, then oldest; closed tabs newest first.
+  const pg = usePaging({ status: tab, priority: priority === 'all' ? undefined : priority, type: type === 'all' ? undefined : type, q: q.trim() || undefined }, 20)
+  const res = useApi('/admin/reports', pg.query)
+  const openRes = useApi('/admin/reports', { status: 'open', limit: 1 })
+  const highRes = useApi('/admin/reports', { status: 'open', priority: 'high', limit: 1 })
+  const detail = useApi(openId ? `/admin/reports/${openId}` : null)
+  const reloadAll = () => {
+    res.reload()
+    openRes.reload()
+    highRes.reload()
+    if (openId) detail.reload()
+  }
+  useAdminEvent(REPORT_EVENTS, reloadAll)
 
-  const counts = useMemo(
-    () => ({
-      open: filtered.filter(r => r.status === 'open').length,
-      resolved: filtered.filter(r => r.status === 'resolved').length,
-      dismissed: filtered.filter(r => r.status === 'dismissed').length,
-    }),
-    [filtered],
-  )
-
-  // Open queue: high priority first, then oldest. Closed tabs: newest first.
-  const rows = useMemo(
-    () =>
-      filtered
-        .filter(r => r.status === tab)
-        .sort((a, b) => (tab === 'open' ? RANK[a.priority] - RANK[b.priority] || a.ts - b.ts : (b.handledAt || b.ts) - (a.handledAt || a.ts))),
-    [filtered, tab],
-  )
-
-  const report = openId ? db.reports.find(r => r.id === openId) : null
-  const otherReports = report ? db.reports.filter(r => r.target.id === report.target.id && r.id !== report.id) : []
+  const rows = res.data?.items || []
+  const counts = res.data?.counts || {}
+  const report = openId ? (detail.data?.report?.id === openId ? detail.data.report : rows.find(r => r.id === openId)) || null : null
+  const otherReports = detail.data?.report?.id === openId ? detail.data.otherReports : []
   const act = pending ? ACTIONS[pending] : null
 
-  const run = (key, note) => {
-    const r = report
-    const a = ACTIONS[key]
-    const t = r.target
-    const by = me?.name || 'Admin'
-    const reasonText = note ? ` — ${note}` : ''
-
-    if (key === 'remove') {
-      if (t.type === 'moment' && db.moments.some(m => m.id === t.id)) {
-        update('moments', t.id, { status: 'removed', removedReason: note }, [`Removed moment (report ${r.id})${reasonText}`, t.id])
-      } else if (db.lives.some(l => l.id === t.id)) {
-        update('lives', t.id, l => ({ status: 'removed', endedAt: l.endedAt || stamp(), removedReason: note }), [`Removed ${t.type} (report ${r.id})${reasonText}`, t.id])
-      }
+  const run = async (key, note) => {
+    try {
+      const r = await api.post(`/admin/reports/${report.id}/resolve`, { action: key, note: note || '' })
+      const done = r.report
+      toast(done.status === 'dismissed' ? 'Report dismissed' : `Report resolved · ${done.action}`)
+      refreshCounts()
+    } catch (e) {
+      toast(errorText(e), 'error')
     }
-    if (key === 'suspend' || key === 'ban') {
-      const col = t.type === 'host' ? 'hosts' : 'users'
-      update(
-        col,
-        t.id,
-        key === 'ban'
-          ? { status: 'banned', statusReason: note }
-          : { status: 'suspended', statusReason: note, suspendedUntil: stamp() + 7 * DAY },
-        [`${key === 'ban' ? 'Banned' : 'Suspended 7 days'} ${t.type} (report ${r.id})${reasonText}`, t.id],
-      )
-    }
-
-    update(
-      'reports',
-      r.id,
-      { status: a.status, action: a.text(r), handledBy: by, handledAt: stamp(), note: note || '' },
-      [`${a.status === 'dismissed' ? 'Dismissed' : 'Resolved'} report: ${a.text(r)}${key === 'warn' ? reasonText : ''}`, r.id],
-    )
-    toast(a.status === 'dismissed' ? 'Report dismissed' : `Report resolved · ${a.text(r)}`)
+    reloadAll()
   }
 
   const columns = [
-    { key: 'priority', label: 'Priority', sort: r => -RANK[r.priority], render: r => <Status value={r.priority} /> },
+    { key: 'priority', label: 'Priority', serverSort: 'priority', render: r => <Status value={r.priority} /> },
     {
       key: 'reason',
       label: 'Reason',
-      sort: r => r.reason,
       render: r => (
         <div style={{ minWidth: 180 }}>
           <b className="a-strong">{r.reason}</b>
-          <div className="a-small a-muted a-mono">{r.id}</div>
+          <div className="a-small a-muted a-mono">{r.id.slice(-8)}</div>
         </div>
       ),
     },
-    { key: 'target', label: 'Target', sort: r => r.target.name, render: r => <Target t={r.target} /> },
-    { key: 'reporter', label: 'Reporter', sort: r => r.reporter.name, render: r => <Who src={r.reporter.avatar} name={r.reporter.name} sub={r.reporter.id} size={32} to={`/admin/users/${r.reporter.id}`} /> },
-    { key: 'ts', label: 'When', sort: r => r.ts, render: r => <span className="a-nowrap a-muted" title={dateTime(r.ts)}>{ago(r.ts)}</span> },
+    { key: 'target', label: 'Target', render: r => <Target t={r.target} /> },
+    { key: 'reporter', label: 'Reporter', render: r => <Who src={r.reporter.avatar} name={r.reporter.name || 'User'} sub={r.reporter.id.slice(-8)} size={32} to={`/admin/users/${r.reporter.id}`} /> },
+    { key: 'ts', label: 'When', serverSort: 'ts', render: r => <span className="a-nowrap a-muted" title={dateTime(r.ts)}>{ago(r.ts)}</span> },
     {
       key: 'status',
       label: 'Status',
-      sort: r => r.status,
       render: r => (
         <div>
           <Status value={r.status} />
@@ -202,7 +171,7 @@ export default function ReportsPage() {
     <>
       <PageHeader
         title="Reports"
-        subtitle={`${num(db.reports.filter(r => r.status === 'open').length)} open · ${num(db.reports.filter(r => r.status === 'open' && r.priority === 'high').length)} high priority`}
+        subtitle={`${num(openRes.data?.total)} open · ${num(highRes.data?.total)} high priority`}
       />
 
       <Tabs
@@ -220,6 +189,7 @@ export default function ReportsPage() {
           key={tab}
           rows={rows}
           columns={columns}
+          {...serverTable(pg, res)}
           onRowClick={r => setOpenId(r.id)}
           empty={
             <Empty
@@ -251,6 +221,7 @@ export default function ReportsPage() {
                   { value: 'moment', label: 'Moments' },
                   { value: 'live', label: 'Lives' },
                   { value: 'room', label: 'Rooms' },
+                  { value: 'message', label: 'Messages' },
                 ]}
               />
             </>
@@ -263,7 +234,7 @@ export default function ReportsPage() {
           open
           title={
             <span className="a-row" style={{ gap: 8 }}>
-              Report <span className="a-mono">{report.id}</span>
+              Report <span className="a-mono">{report.id.slice(-8)}</span>
             </span>
           }
           onClose={() => setOpenId(null)}
@@ -300,6 +271,16 @@ export default function ReportsPage() {
                   <dd>{label(report.target.type)}</dd>
                   <dt>{isContent(report.target) ? 'Content ID' : 'Account ID'}</dt>
                   <dd className="a-mono">{report.target.id}</dd>
+                  {report.target.owner ? (
+                    <>
+                      <dt>Owner</dt>
+                      <dd>
+                        <Link to={`/admin/users/${report.target.owner}`} className="a-mono" style={{ color: 'var(--brand)' }}>
+                          {report.target.owner}
+                        </Link>
+                      </dd>
+                    </>
+                  ) : null}
                   <dt>Other reports</dt>
                   <dd>
                     {otherReports.length ? (
@@ -320,7 +301,7 @@ export default function ReportsPage() {
             </Card>
 
             <Card title="Reporter">
-              <Who src={report.reporter.avatar} name={report.reporter.name} sub={report.reporter.id} to={`/admin/users/${report.reporter.id}`} />
+              <Who src={report.reporter.avatar} name={report.reporter.name || 'User'} sub={report.reporter.id} to={`/admin/users/${report.reporter.id}`} />
             </Card>
 
             {report.status !== 'open' ? (
@@ -359,8 +340,9 @@ export default function ReportsPage() {
         reasonLabel={act?.reason}
         onClose={() => setPending(null)}
         onConfirm={note => {
-          run(pending, note)
+          const key = pending
           setPending(null)
+          run(key, note)
         }}
       />
     </>

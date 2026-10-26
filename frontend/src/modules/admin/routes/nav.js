@@ -20,6 +20,7 @@ import {
   ScrollText,
   Settings,
   ShieldCheck,
+  ShoppingBag,
   Sparkles,
   UserRound,
   UsersRound,
@@ -48,9 +49,7 @@ export const canAccess = (role, section) => {
   return r.sections === '*' || r.sections.includes(section)
 }
 
-const count = (list, pred) => list.filter(pred).length
-
-/** Sidebar. `section` drives permissions; `badge(db)` shows a live counter. */
+/** Sidebar. `section` drives permissions; `badge(counts)` shows a live counter (see StoreProvider counts). */
 export const NAV = [
   {
     title: 'Overview',
@@ -66,7 +65,7 @@ export const NAV = [
         label: 'Host applications',
         icon: BadgeCheck,
         section: 'applications',
-        badge: db => count(db.applications, a => a.status === 'pending'),
+        badge: c => c.pendingApplications,
       },
       { to: '/admin/agencies', label: 'Agencies', icon: Building2, section: 'agencies' },
     ],
@@ -80,7 +79,7 @@ export const NAV = [
         label: 'Lives & rooms',
         icon: Radio,
         section: 'lives',
-        badge: db => count(db.lives, l => l.status === 'live'),
+        badge: c => c.liveNow,
       },
       { to: '/admin/moments', label: 'Moments', icon: Image, section: 'moments' },
     ],
@@ -93,14 +92,14 @@ export const NAV = [
         label: 'Reports',
         icon: Flag,
         section: 'reports',
-        badge: db => count(db.reports, r => r.status === 'open'),
+        badge: c => c.openReports,
       },
       {
         to: '/admin/support',
         label: 'Support tickets',
         icon: LifeBuoy,
         section: 'support',
-        badge: db => count(db.tickets, t => t.status === 'open'),
+        badge: c => c.openTickets,
       },
     ],
   },
@@ -114,14 +113,14 @@ export const NAV = [
         label: 'Withdrawals',
         icon: Wallet,
         section: 'finance',
-        badge: db => count(db.withdrawals, w => w.status === 'requested'),
+        badge: c => c.withdrawalsRequested,
       },
       {
         to: '/admin/finance/disputes',
         label: 'Earning disputes',
         icon: Scale,
         section: 'finance',
-        badge: db => count(db.disputes, d => d.status === 'open'),
+        badge: c => c.openDisputes,
       },
     ],
   },
@@ -133,6 +132,7 @@ export const NAV = [
       { to: '/admin/monetization/gifts', label: 'Gifts', icon: Gift, section: 'monetization' },
       { to: '/admin/monetization/host-levels', label: 'Host levels & prices', icon: Sparkles, section: 'monetization' },
       { to: '/admin/monetization/vip', label: 'VIP & Royal Club', icon: Crown, section: 'monetization' },
+      { to: '/admin/monetization/store', label: 'Store, tasks & families', icon: ShoppingBag, section: 'monetization' },
     ],
   },
   {

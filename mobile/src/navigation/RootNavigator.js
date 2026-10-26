@@ -68,7 +68,6 @@ import {
   ReportScreen,
   VerificationScreen,
 } from '../screens/profile/MiscScreens';
-import WalletScreen from '../screens/wallet/WalletScreen';
 import HostDashboardScreen from '../screens/wallet/HostDashboardScreen';
 import WithdrawScreen from '../screens/wallet/WithdrawScreen';
 import TransactionsScreen from '../screens/wallet/TransactionsScreen';
@@ -99,6 +98,8 @@ const theme = {
 // Approved hosts get their Host Center as a tab instead of Coins
 // (coins stay one tap away via the balance pill in the top bar).
 const HostTabScreen = props => <HostCenterScreen {...props} tab />;
+// Recharge opened from anywhere (low balance, gifts…): the Coins page with a back button.
+const WalletScreen = props => <CoinsScreen {...props} stack />;
 
 function MainTabs() {
   const { isHost } = useApp();

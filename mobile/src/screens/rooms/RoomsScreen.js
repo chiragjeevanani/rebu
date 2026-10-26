@@ -1,5 +1,14 @@
-import React, { useEffect, useState } from 'react';
-import { FlatList, Image, Pressable, StyleSheet, View } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  FlatList,
+  Image,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  View,
+} from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   AudioLines,
   Plus,
@@ -9,7 +18,7 @@ import {
 } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ROOMS } from '../../data/social';
+import { listRooms } from '../../api/rooms';
 import { useApp } from '../../context/AppContext';
 import Screen from '../../components/Screen';
 import Txt from '../../components/Txt';
@@ -60,7 +69,23 @@ export function RoomCard({ room, onPress }) {
 
 export default function RoomsScreen({ navigation, route }) {
   const insets = useSafeAreaInsets();
-  const { myRooms } = useApp();
+  const { user } = useApp();
+  const [rooms, setRooms] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const load = useCallback(
+    () =>
+      listRooms()
+        .then(setRooms)
+        .catch(() => setRooms(r => r || [])),
+    [],
+  );
+  useFocusEffect(
+    useCallback(() => {
+      load();
+      const t = setInterval(load, 15000);
+      return () => clearInterval(t);
+    }, [load]),
+  );
   const [tab, setTab] = useState(route.params?.tab || 'For You');
   const [searching, setSearching] = useState(false);
   const [q, setQ] = useState('');
@@ -70,14 +95,15 @@ export default function RoomsScreen({ navigation, route }) {
     if (route.params?.tab) setTab(route.params.tab);
   }, [route.params?.tab]);
 
+  const all = rooms || [];
   let data =
     tab === 'Mine'
-      ? myRooms
+      ? all.filter(r => r.owner?.id === user.id)
       : tab === 'Video'
-      ? ROOMS.filter(r => r.kind === 'video')
+      ? all.filter(r => r.kind === 'video')
       : tab === 'New'
-      ? [...ROOMS].reverse()
-      : [...myRooms, ...ROOMS].sort((a, b) => b.count - a.count);
+      ? [...all].sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))
+      : [...all].sort((a, b) => b.count - a.count);
   if (q.trim()) {
     data = data.filter(r =>
       r.title.toLowerCase().includes(q.trim().toLowerCase()),
@@ -127,22 +153,37 @@ export default function RoomsScreen({ navigation, route }) {
         keyExtractor={r => r.id}
         contentContainerStyle={styles.list}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={async () => {
+              setRefreshing(true);
+              await load();
+              setRefreshing(false);
+            }}
+            colors={[colors.primary]}
+          />
+        }
         ListEmptyComponent={
-          <View style={styles.empty}>
-            <Txt variant="body" color={colors.textMuted} center>
-              {tab === 'Mine'
-                ? 'You haven’t created a room yet.'
-                : 'No rooms found.'}
-            </Txt>
-            {tab === 'Mine' ? (
-              <Button
-                title="Create my room"
-                full={false}
-                style={styles.emptyBtn}
-                onPress={() => navigation.navigate('CreateRoom')}
-              />
-            ) : null}
-          </View>
+          !rooms ? (
+            <ActivityIndicator color={colors.primary} style={styles.empty} />
+          ) : (
+            <View style={styles.empty}>
+              <Txt variant="body" color={colors.textMuted} center>
+                {tab === 'Mine'
+                  ? 'You haven’t created a room yet.'
+                  : 'No rooms are open right now — start one!'}
+              </Txt>
+              {tab === 'Mine' ? (
+                <Button
+                  title="Create my room"
+                  full={false}
+                  style={styles.emptyBtn}
+                  onPress={() => navigation.navigate('CreateRoom')}
+                />
+              ) : null}
+            </View>
+          )
         }
         renderItem={({ item }) => (
           <RoomCard

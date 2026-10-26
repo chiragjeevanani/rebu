@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useCallback } from 'react';
 import {
   Alert,
   FlatList,
@@ -10,7 +10,11 @@ import {
 } from 'react-native';
 import { Hand, Phone, Pin, Search, SquarePen } from 'lucide-react-native';
 import { colors, fonts, spacing } from '../../theme';
-import { CHATS, HOSTS } from '../../data/mock';
+import { useFocusEffect } from '@react-navigation/native';
+import { del, get, patch as apiPatch } from '../../api/client';
+import { toAppChat } from '../../api/chat';
+import { useHosts } from '../../api/hosts';
+import { useSocketEvent } from '../../api/socket';
 import { useApp } from '../../context/AppContext';
 import Screen from '../../components/Screen';
 import Txt from '../../components/Txt';
@@ -95,15 +99,25 @@ function Row({
 
 export default function ChatListScreen({ navigation }) {
   useSecureScreen();
-  const { following, greeted, greet, toggleFollow } = useApp();
-  const [items, setItems] = useState(CHATS);
+  const { following, greeted, toggleFollow } = useApp();
+  const [items, setItems] = useState([]);
+  const hosts = useHosts();
+
+  const load = useCallback(() => {
+    get('/chats?limit=50')
+      .then(r => setItems(r.items.map(toAppChat)))
+      .catch(() => {});
+  }, []);
+  useFocusEffect(load);
+  // New messages (and read receipts) refresh the list.
+  useSocketEvent('chat:message', load);
   const [regulars, setRegulars] = useState([]);
   const [menu, setMenu] = useState(null); // { chat, anchor }
   const [filter, setFilter] = useState('All');
   const [searching, setSearching] = useState(false);
   const [q, setQ] = useState('');
 
-  const online = HOSTS.filter(h => h.online);
+  const online = hosts.filter(h => h.online);
   const spotlight = online[0];
   const unreadCount = items.filter(c => c.unread).length;
   const term = q.trim().toLowerCase();
@@ -117,8 +131,14 @@ export default function ChatListScreen({ navigation }) {
   if (filter === REGULARS) chats = chats.filter(c => regulars.includes(c.id));
   chats = [...chats.filter(c => c.pinned), ...chats.filter(c => !c.pinned)];
 
-  const update = (id, patch) =>
+  // Optimistic local update, mirrored to the server (pinned / unread).
+  const update = (id, patch) => {
     setItems(list => list.map(c => (c.id === id ? { ...c, ...patch } : c)));
+    const body = {};
+    if ('pinned' in patch) body.pinned = patch.pinned;
+    if ('unread' in patch) body.unread = !!patch.unread;
+    apiPatch(`/chats/${id}`, body).catch(load);
+  };
 
   const toggleList = (chat, name) => {
     if (name === 'Favourites') return toggleFollow(chat.userId);
@@ -136,20 +156,21 @@ export default function ChatListScreen({ navigation }) {
         {
           text: 'Delete',
           style: 'destructive',
-          onPress: () => setItems(list => list.filter(c => c.id !== chat.id)),
+          onPress: () => {
+            setItems(list => list.filter(c => c.id !== chat.id));
+            del(`/chats/${chat.id}`).catch(load);
+          },
         },
       ],
     );
 
   const chatIds = items.map(c => c.userId);
-  const suggested = HOSTS.filter(h => !chatIds.includes(h.id));
+  const suggested = hosts.filter(h => !chatIds.includes(h.id));
 
   const sayHi = h => {
-    const first = !greeted.includes(h.id);
-    greet(h.id);
     navigation.navigate('ChatRoom', {
       chat: { userId: h.id, name: h.name, photo: h.photo, online: h.online },
-      greeting: first,
+      greet: !greeted.includes(h.id),
     });
   };
 

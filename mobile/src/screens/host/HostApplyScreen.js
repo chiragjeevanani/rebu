@@ -10,6 +10,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { launchCamera } from 'react-native-image-picker';
+import { post, uploadImage } from '../../api/client';
 import {
   BadgeCheck,
   Building2,
@@ -100,7 +101,7 @@ function Section({ title, sub, children }) {
 }
 
 export default function HostApplyScreen({ navigation, route }) {
-  const { user, hostApp, hostLevel, submitHostApp } = useApp();
+  const { user, hostApp, hostLevel, refreshHostApp } = useApp();
   // Resubmitting after a rejection: start from the saved answers.
   const prev = route.params?.resubmit ? hostApp.data || {} : {};
   const maxRate = HOST_LEVEL_MAX[hostLevel];
@@ -163,24 +164,46 @@ export default function HostApplyScreen({ navigation, route }) {
     setTimeout(() => setFaceState('ok'), 1600);
   };
 
-  const next = () => {
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+
+  const next = async () => {
     if (step < STEPS.length - 1) {
       setStep(step + 1);
       return;
     }
-    submitHostApp({
-      name: name.trim(),
-      gender,
-      dob,
-      languages,
-      bio: bio.trim(),
-      photos,
-      selfie,
-      id: { type: idType, last4: idNumber.trim().slice(-4) },
-      agency: agency.trim() || null,
-      rates,
-    });
-    navigation.replace('HostStatus');
+    setSubmitting(true);
+    setSubmitError('');
+    try {
+      // Images go to the server first so reviewers can see them.
+      const [photoUrls, selfieUrl, idUrl] = await Promise.all([
+        Promise.all(photos.map(uploadImage)),
+        uploadImage(selfie),
+        uploadImage(idPhoto),
+      ]);
+      await post('/host/application', {
+        name: name.trim(),
+        gender,
+        dob: `${dob.y}-${dob.m.padStart(2, '0')}-${dob.d.padStart(2, '0')}`,
+        languages,
+        bio: bio.trim(),
+        photos: photoUrls,
+        selfie: selfieUrl,
+        id: { type: idType, last4: idNumber.trim().slice(-4), photo: idUrl },
+        agencyCode: agency.trim() || null,
+        rates,
+      });
+      await refreshHostApp();
+      navigation.replace('HostStatus');
+    } catch (e) {
+      setSubmitError(
+        e.details?.length
+          ? `${e.message} ${e.details.map(d => d.message).join(' · ')}`
+          : e.message,
+      );
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const back = () => (step ? setStep(step - 1) : navigation.goBack());
@@ -190,24 +213,36 @@ export default function HostApplyScreen({ navigation, route }) {
       scroll
       edges={['top', 'bottom']}
       footer={
-        <View style={styles.footer}>
-          {step ? (
-            <Button
-              title="Back"
-              variant="outline"
-              full={false}
-              style={styles.backBtn}
-              onPress={back}
-            />
+        <View>
+          {submitError ? (
+            <Txt
+              variant="small"
+              color={colors.danger}
+              style={styles.submitError}
+            >
+              {submitError}
+            </Txt>
           ) : null}
-          <Button
-            title={
-              step === STEPS.length - 1 ? 'Submit application' : 'Continue'
-            }
-            disabled={!valid}
-            style={styles.flex}
-            onPress={next}
-          />
+          <View style={styles.footer}>
+            {step ? (
+              <Button
+                title="Back"
+                variant="outline"
+                full={false}
+                style={styles.backBtn}
+                onPress={back}
+              />
+            ) : null}
+            <Button
+              title={
+                step === STEPS.length - 1 ? 'Submit application' : 'Continue'
+              }
+              disabled={!valid || submitting}
+              loading={submitting}
+              style={styles.flex}
+              onPress={next}
+            />
+          </View>
         </View>
       }
     >
@@ -526,6 +561,7 @@ export default function HostApplyScreen({ navigation, route }) {
 }
 
 const styles = StyleSheet.create({
+  submitError: { paddingHorizontal: spacing.md, paddingTop: 8 },
   flex: { flex: 1 },
   body: { paddingHorizontal: spacing.md, paddingBottom: 12 },
   footer: {

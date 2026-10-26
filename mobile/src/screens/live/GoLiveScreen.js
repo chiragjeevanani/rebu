@@ -2,6 +2,7 @@
 // then start a solo live, a premium live, a video party or an audio room.
 import React, { useState } from 'react';
 import {
+  Alert,
   Image,
   KeyboardAvoidingView,
   Pressable,
@@ -32,6 +33,7 @@ import ListRow from '../../components/ListRow';
 import RateChips from '../../components/RateChips';
 import LiveCamera from '../../components/LiveCamera';
 import PhotoSourceSheet from '../../components/PhotoSourceSheet';
+import { createRoom } from '../../api/rooms';
 import { CoinIcon } from '../../components/CoinPill';
 
 const MODES = [
@@ -50,8 +52,7 @@ const HINTS = {
 
 export default function GoLiveScreen({ navigation }) {
   const insets = useSafeAreaInsets();
-  const { user, isHost, hostRates, setHostRates, hostLevel, addRoom } =
-    useApp();
+  const { user, isHost, hostRates, setHostRates, hostLevel } = useApp();
   const first = user.name.split(' ')[0];
 
   const [mode, setMode] = useState('live');
@@ -77,17 +78,15 @@ export default function GoLiveScreen({ navigation }) {
     }
     const name = title.trim() || `${first}’s live`;
     if (mode === 'party' || mode === 'audio') {
-      const room = {
-        id: `my${Date.now()}`,
+      createRoom({
         title: name,
         welcome: 'Welcome! Be kind and have fun 💜',
         category: 'Chat',
         kind: mode === 'party' ? 'video' : 'voice',
-        count: 1,
         cover,
-      };
-      addRoom(room);
-      navigation.replace('Room', { room });
+      })
+        .then(r => navigation.replace('Room', r))
+        .catch(e => Alert.alert('Couldn’t open the room', e.message));
       return;
     }
     navigation.replace('MyLive', {

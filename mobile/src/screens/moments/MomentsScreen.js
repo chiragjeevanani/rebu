@@ -1,13 +1,16 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   Image,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   TextInput,
   View,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   Camera,
   ChevronRight,
@@ -15,13 +18,16 @@ import {
   Ellipsis,
   Gift,
   MessageSquare,
-  Play,
   Send,
   ThumbsUp,
+  Trash2,
 } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
-import { MOMENT_COMMENTS, MOMENTS, TOPICS } from '../../data/social';
+import { TOPICS } from '../../data/social';
 import { useApp } from '../../context/AppContext';
+import { del, get, post } from '../../api/client';
+import { toAppHost } from '../../api/hosts';
+import { timeLabel } from '../../api/chat';
 import Screen from '../../components/Screen';
 import Txt from '../../components/Txt';
 import Avatar from '../../components/Avatar';
@@ -33,29 +39,17 @@ import { AgeBadge, HiButton, TopTabs, VipBadge } from '../../components/Social';
 
 const topicLabel = key => TOPICS.find(t => t.key === key)?.label || key;
 
-function Post({
-  m,
-  liked,
-  greeted,
-  onLike,
-  onComments,
-  onHi,
-  onOpenHost,
-  onMore,
-}) {
-  const mine = !m.host;
-  const author = m.host || m.author;
+function Post({ m, greeted, onLike, onComments, onHi, onOpenHost, onMore }) {
+  const author = m.author || {};
   return (
     <View style={styles.post}>
       <View style={styles.postHead}>
-        <Pressable onPress={mine ? undefined : onOpenHost}>
-          <Avatar uri={author.photo} size={58} online={author.online} />
+        <Pressable onPress={author.isHost ? onOpenHost : undefined}>
+          <Avatar uri={author.photo} size={58} online={!!author.host?.online} />
         </Pressable>
         <View style={styles.flex}>
-          <Txt variant="h3">
-            {author.name} {author.emoji || ''}
-          </Txt>
-          {mine ? (
+          <Txt variant="h3">{author.name}</Txt>
+          {m.mine ? (
             <Txt variant="small">Your moment</Txt>
           ) : (
             <View style={styles.badges}>
@@ -64,7 +58,7 @@ function Post({
             </View>
           )}
         </View>
-        {mine ? null : <HiButton greeted={greeted} onPress={onHi} />}
+        {m.mine ? null : <HiButton greeted={greeted} onPress={onHi} />}
       </View>
 
       <View style={styles.postBody}>
@@ -73,28 +67,23 @@ function Post({
             {m.text}
           </Txt>
         ) : null}
-        {m.media ? (
+        {m.media?.[0]?.url ? (
           <View style={styles.media}>
-            <Image source={{ uri: m.media }} style={StyleSheet.absoluteFill} />
-            {m.type === 'video' ? (
-              <>
-                <View style={styles.play}>
-                  <Play size={28} color={colors.white} fill={colors.white} />
-                </View>
-                <Txt style={styles.duration}>{m.duration}</Txt>
-              </>
-            ) : null}
+            <Image
+              source={{ uri: m.media[0].url }}
+              style={StyleSheet.absoluteFill}
+            />
           </View>
         ) : null}
-        {m.topic ? (
+        {m.topic && m.topic !== 'new' ? (
           <View style={styles.topicChip}>
             <Txt style={styles.hash}>#</Txt>
             <Txt variant="label">{topicLabel(m.topic)}</Txt>
           </View>
         ) : null}
         <Txt variant="small" color={colors.textFaint} style={styles.meta}>
-          {m.time}
-          {author.distanceKm ? ` · ${author.distanceKm}km` : ''}
+          {timeLabel(m.at)}
+          {author.city ? ` · ${author.city}` : ''}
         </Txt>
         <View style={styles.actions}>
           <Pressable onPress={onMore} hitSlop={8}>
@@ -104,11 +93,11 @@ function Post({
           <Pressable onPress={onLike} style={styles.action} hitSlop={6}>
             <ThumbsUp
               size={22}
-              color={liked ? colors.primary : colors.ink}
-              fill={liked ? colors.primary : 'transparent'}
+              color={m.liked ? colors.primary : colors.ink}
+              fill={m.liked ? colors.primary : 'transparent'}
             />
-            <Txt variant="label" color={liked ? colors.primary : colors.ink}>
-              {m.likes + (liked ? 1 : 0)}
+            <Txt variant="label" color={m.liked ? colors.primary : colors.ink}>
+              {m.likes}
             </Txt>
           </Pressable>
           <Pressable onPress={onComments} style={styles.action} hitSlop={6}>
@@ -121,49 +110,88 @@ function Post({
   );
 }
 
+const TABS = { 'For You': 'all', Following: 'following', Mine: 'mine' };
+
 export default function MomentsScreen({ navigation }) {
-  const { likedMoments, toggleLike, greeted, greet, myMoments } = useApp();
+  const { greeted, user } = useApp();
   const [tab, setTab] = useState('For You');
   const [topic, setTopic] = useState(null);
-  const [comments, setComments] = useState(null);
+  const [items, setItems] = useState(null);
+  const [error, setError] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+  const [comments, setComments] = useState(null); // moment id
+  const [thread, setThread] = useState([]);
   const [draft, setDraft] = useState('');
-  const [extra, setExtra] = useState({});
-  const [gift, setGift] = useState(false);
+  const [gift, setGift] = useState(null); // author to gift
   const [menu, setMenu] = useState(null);
 
-  let data = [...myMoments, ...MOMENTS];
-  if (tab === 'Newcomers')
-    data = data.filter(m => !m.host || m.host.followers < 10000);
-  if (topic) data = data.filter(m => m.topic === topic);
+  const load = useCallback(async () => {
+    try {
+      const q = `tab=${TABS[tab]}${topic ? `&topic=${topic}` : ''}&limit=50`;
+      const r = await get(`/moments?${q}`);
+      setItems(r.items);
+      setError('');
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [tab, topic]);
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load]),
+  );
 
-  const sayHi = h => {
-    const first = !greeted.includes(h.id);
-    greet(h.id);
+  const patchMoment = (id, p) =>
+    setItems(list => list.map(m => (m.id === id ? { ...m, ...p } : m)));
+
+  // Optimistic like; the server's count wins.
+  const toggleLike = async m => {
+    const on = !m.liked;
+    patchMoment(m.id, { liked: on, likes: m.likes + (on ? 1 : -1) });
+    try {
+      const path = `/moments/${m.id}/like`;
+      const r = await (on ? post(path) : del(path));
+      patchMoment(m.id, { liked: r.liked, likes: r.likes });
+    } catch {
+      patchMoment(m.id, { liked: m.liked, likes: m.likes });
+    }
+  };
+
+  useEffect(() => {
+    if (!comments) return setThread([]);
+    get(`/moments/${comments}/comments?limit=100`)
+      .then(r => setThread(r.items))
+      .catch(() => setThread([]));
+  }, [comments]);
+
+  const postComment = async () => {
+    const text = draft.trim();
+    if (!text) return;
+    setDraft('');
+    try {
+      const r = await post(`/moments/${comments}/comments`, { text });
+      setThread(t => [...t, r.comment]);
+      patchMoment(comments, { comments: r.comments });
+    } catch (e) {
+      setDraft(text);
+      setThread(t => [
+        ...t,
+        { id: `err${Date.now()}`, user: null, text: e.message, error: true },
+      ]);
+    }
+  };
+
+  const sayHi = a => {
     navigation.navigate('ChatRoom', {
-      chat: { userId: h.id, name: h.name, photo: h.photo, online: h.online },
-      greeting: first,
+      chat: { userId: a.id, name: a.name, photo: a.photo },
+      greet: !greeted.includes(a.id),
     });
   };
 
-  const thread = comments
-    ? [...MOMENT_COMMENTS, ...(extra[comments] || [])]
-    : [];
-  const postComment = () => {
-    if (!draft.trim()) return;
-    setExtra(e => ({
-      ...e,
-      [comments]: [
-        ...(e[comments] || []),
-        {
-          id: String(Date.now()),
-          name: 'You',
-          photo: 'https://i.pravatar.cc/200?img=12',
-          text: draft.trim(),
-          time: 'now',
-        },
-      ],
-    }));
-    setDraft('');
+  const remove = async m => {
+    setMenu(null);
+    await del(`/moments/${m.id}`).catch(() => {});
+    setItems(list => list.filter(x => x.id !== m.id));
   };
 
   // Split the tags into two columns of cards.
@@ -173,7 +201,7 @@ export default function MomentsScreen({ navigation }) {
     <Screen>
       <TopTabs
         onBack={() => navigation.goBack()}
-        tabs={['For You', 'Newcomers']}
+        tabs={Object.keys(TABS)}
         value={tab}
         onChange={setTab}
         right={
@@ -188,10 +216,21 @@ export default function MomentsScreen({ navigation }) {
         }
       />
       <FlatList
-        data={data}
+        data={items || []}
         keyExtractor={m => m.id}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.list}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={async () => {
+              setRefreshing(true);
+              await load();
+              setRefreshing(false);
+            }}
+            colors={[colors.primary]}
+          />
+        }
         ListHeaderComponent={
           <>
             <View style={styles.hotHead}>
@@ -235,29 +274,40 @@ export default function MomentsScreen({ navigation }) {
                 </View>
               ))}
             </ScrollView>
+            {!items && !error ? (
+              <ActivityIndicator color={colors.primary} style={styles.empty} />
+            ) : null}
           </>
         }
         ItemSeparatorComponent={() => <View style={styles.sep} />}
         ListEmptyComponent={
-          <Txt
-            variant="body"
-            color={colors.textMuted}
-            center
-            style={styles.empty}
-          >
-            No moments in this topic yet.
-          </Txt>
+          items || error ? (
+            <Txt
+              variant="body"
+              color={error ? colors.danger : colors.textMuted}
+              center
+              style={styles.empty}
+            >
+              {error ||
+                (tab === 'Following'
+                  ? 'Hosts you follow haven’t posted yet.'
+                  : tab === 'Mine'
+                  ? 'You haven’t posted a moment yet.'
+                  : 'No moments here yet.')}
+            </Txt>
+          ) : null
         }
         renderItem={({ item }) => (
           <Post
             m={item}
-            liked={likedMoments.includes(item.id)}
-            greeted={item.host && greeted.includes(item.host.id)}
-            onLike={() => toggleLike(item.id)}
+            greeted={greeted.includes(item.author?.id)}
+            onLike={() => toggleLike(item)}
             onComments={() => setComments(item.id)}
-            onHi={() => sayHi(item.host)}
+            onHi={() => sayHi(item.author)}
             onOpenHost={() =>
-              navigation.navigate('HostProfile', { host: item.host })
+              navigation.navigate('HostProfile', {
+                host: toAppHost(item.author),
+              })
             }
             onMore={() => setMenu(item)}
           />
@@ -269,14 +319,26 @@ export default function MomentsScreen({ navigation }) {
         onClose={() => setComments(null)}
         title="Comments"
       >
+        {thread.length === 0 ? (
+          <Txt variant="small" center style={styles.noComments}>
+            Be the first to comment.
+          </Txt>
+        ) : null}
         {thread.map(c => (
           <View key={c.id} style={styles.comment}>
-            <Avatar uri={c.photo} size={36} />
+            <Avatar uri={c.user?.photo} size={36} />
             <View style={styles.flex}>
               <Txt variant="label">
-                {c.name} <Txt variant="tiny">{c.time}</Txt>
+                {c.error
+                  ? 'Not posted'
+                  : c.user?.id === user.id
+                  ? 'You'
+                  : c.user?.name}{' '}
+                <Txt variant="tiny">{c.at ? timeLabel(c.at) : ''}</Txt>
               </Txt>
-              <Txt variant="body">{c.text}</Txt>
+              <Txt variant="body" color={c.error ? colors.danger : colors.ink}>
+                {c.text}
+              </Txt>
             </View>
           </View>
         ))}
@@ -299,32 +361,50 @@ export default function MomentsScreen({ navigation }) {
       </Sheet>
 
       <Sheet visible={!!menu} onClose={() => setMenu(null)}>
-        {menu?.host ? (
+        {menu?.mine ? (
           <ListRow
-            icon={Gift}
-            title={`Send ${menu.host.name} a gift`}
-            onPress={() => {
-              setMenu(null);
-              setGift(true);
-            }}
+            icon={Trash2}
+            title="Delete this moment"
+            last
+            onPress={() => remove(menu)}
           />
-        ) : null}
-        <ListRow
-          icon={Flag}
-          title="Report this moment"
-          last
-          onPress={() => {
-            const name = menu?.host?.name || 'moment';
-            setMenu(null);
-            navigation.navigate('Report', { name });
-          }}
-        />
+        ) : (
+          <>
+            {menu?.author?.isHost ? (
+              <ListRow
+                icon={Gift}
+                title={`Send ${menu.author.name} a gift`}
+                onPress={() => {
+                  setGift(menu.author);
+                  setMenu(null);
+                }}
+              />
+            ) : null}
+            <ListRow
+              icon={Flag}
+              title="Report this moment"
+              last
+              onPress={() => {
+                const m = menu;
+                setMenu(null);
+                navigation.navigate('Report', {
+                  name: `${m.author?.name || 'this'}’s moment`,
+                  targetType: 'moment',
+                  targetId: m.id,
+                });
+              }}
+            />
+          </>
+        )}
       </Sheet>
       <GiftSheet
-        visible={gift}
-        onClose={() => setGift(false)}
+        visible={!!gift}
+        onClose={() => setGift(null)}
+        toId={gift?.id}
+        to={gift?.name}
+        context={{ type: 'chat' }}
         onRecharge={() => {
-          setGift(false);
+          setGift(null);
           navigation.navigate('Wallet');
         }}
         dark={false}
@@ -335,6 +415,7 @@ export default function MomentsScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  noComments: { paddingVertical: 16 },
   list: { paddingHorizontal: spacing.md, paddingBottom: 24 },
   hotHead: {
     flexDirection: 'row',

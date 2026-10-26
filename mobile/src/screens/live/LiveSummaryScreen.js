@@ -7,6 +7,7 @@ import { colors, fonts, radius } from '../../theme';
 import { useApp } from '../../context/AppContext';
 import { num } from '../../utils/format';
 import { inr } from '../../data/economy';
+import Avatar from '../../components/Avatar';
 import Txt from '../../components/Txt';
 import Button from '../../components/Button';
 
@@ -78,7 +79,7 @@ export default function LiveSummaryScreen({ navigation, route }) {
             {p.gifters.map((g, i) => (
               <View key={g.id} style={styles.gifter}>
                 <Txt style={styles.rank}>{i + 1}</Txt>
-                <Image source={{ uri: g.photo }} style={styles.gAvatar} />
+                <Avatar uri={g.photo} size={34} />
                 <Txt style={styles.gName}>{g.name}</Txt>
                 <Gem size={13} color={colors.coin} />
                 <Txt style={styles.gCoins}>{num(g.coins)}</Txt>
@@ -179,7 +180,6 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   rank: { width: 16, fontFamily: fonts.bold, fontSize: 14, color: colors.coin },
-  gAvatar: { width: 34, height: 34, borderRadius: 17 },
   gName: {
     flex: 1,
     fontFamily: fonts.semibold,

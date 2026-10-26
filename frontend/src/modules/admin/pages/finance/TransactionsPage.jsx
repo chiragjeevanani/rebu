@@ -1,13 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { CircleCheck, CircleX, Download, IndianRupee, ReceiptText, RotateCcw, TriangleAlert } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
-import { Button, Card, Confirm, DataTable, Drawer, Empty, PageHeader, SearchInput, Seg, Select, Stat, Status, Tabs, Who } from '../../components/ui'
+import { serverTable, useApi, usePaging } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
+import { Button, Card, Confirm, DataTable, Drawer, Empty, Loading, PageHeader, SearchInput, Seg, Select, Stat, Status, Tabs, Who } from '../../components/ui'
 import { ago, dateTime, exportCsv, inr, num, pct } from '../../utils/format'
-
-// Timestamp for admin actions; called from event handlers only.
-const stamp = () => Date.now()
 
 const DAY = 86400000
 const STATUSES = ['success', 'pending', 'failed', 'refunded']
@@ -18,8 +17,7 @@ const RANGES = [
   { value: 'all', label: 'All' },
 ]
 
-const total = t => t.coins + t.bonus
-const sumAmount = list => list.reduce((n, t) => n + t.amount, 0)
+const total = t => t.coins + (t.bonus || 0)
 
 function Coins({ t }) {
   return (
@@ -30,8 +28,19 @@ function Coins({ t }) {
   )
 }
 
+/** Range → the API's `days` (fractional for "today": since local midnight). */
+function daysFor(range, now) {
+  if (range === 'all') return undefined
+  if (range === 'today') {
+    const d = new Date(now)
+    d.setHours(0, 0, 0, 0)
+    return Math.max(0.001, (now - d.getTime()) / DAY).toFixed(4)
+  }
+  return range
+}
+
 export default function TransactionsPage() {
-  const { db, me, update } = useStore()
+  const { db } = useStore()
   const toast = useToast()
   const [now] = useState(() => Date.now())
   const [tab, setTab] = useState('all')
@@ -40,101 +49,81 @@ export default function TransactionsPage() {
   const [q, setQ] = useState('')
   const [openId, setOpenId] = useState(null)
   const [confirm, setConfirm] = useState(null) // refund | success | failed
+  const [busy, setBusy] = useState(false)
 
-  const methods = useMemo(() => Array.from(new Set(db.transactions.map(t => t.method))).sort(), [db.transactions])
+  const filters = { status: tab === 'all' ? undefined : tab, method, days: daysFor(range, now), q: q.trim() || undefined }
+  const pg = usePaging(filters, 20)
+  const res = useApi('/admin/finance/transactions', pg.query)
+  const rows = res.data?.items || []
+  const totals = res.data?.totals || {}
+  const methods = res.data?.methods || []
 
-  const from = useMemo(() => {
-    if (range === 'all') return 0
-    if (range === 'today') {
-      const d = new Date(now)
-      d.setHours(0, 0, 0, 0)
-      return d.getTime()
-    }
-    return now - Number(range) * DAY
-  }, [range, now])
+  // Totals are per status over the same filters (minus the status tab).
+  const t = st => totals[st] || { count: 0, amount: 0 }
+  const allCount = STATUSES.reduce((n, st) => n + t(st).count, 0)
+  const success = t('success')
+  const failed = t('failed')
+  const refunded = t('refunded')
+  const pending = t('pending')
 
-  // Everything except the status tab, so tab counts and stats follow the filters.
-  const base = useMemo(() => {
-    const s = q.trim().toLowerCase()
-    return db.transactions.filter(
-      t =>
-        t.ts >= from &&
-        (method === 'all' || t.method === method) &&
-        (!s || [t.id, t.userId, t.userName, t.gatewayRef].some(v => String(v).toLowerCase().includes(s))),
-    )
-  }, [db.transactions, from, method, q])
-
-  const rows = tab === 'all' ? base : base.filter(t => t.status === tab)
-  const by = st => base.filter(t => t.status === st)
-  const success = by('success')
-  const failed = by('failed')
-  const refunded = by('refunded')
-  const pending = by('pending')
-
-  const tx = openId ? db.transactions.find(t => t.id === openId) : null
-  const user = tx ? db.users.find(u => u.id === tx.userId) : null
+  const detail = useApi(openId ? `/admin/finance/transactions/${openId}` : null)
+  const tx = openId ? detail.data?.transaction || rows.find(x => x.id === openId) || null : null
+  const userRes = useApi(tx?.userId ? `/admin/users/${tx.userId}` : null)
+  const user = userRes.data?.user || null
+  const userMissing = userRes.error?.status === 404
   const pack = tx ? db.config.coinPacks.find(p => p.id === tx.packId) : null
 
-  const refund = reason => {
-    const coins = total(tx)
-    update('transactions', tx.id, { status: 'refunded', refundReason: reason, refundedAt: stamp(), handledBy: me?.name }, [
-      `Refunded payment ${inr(tx.amount)} · ${reason}`,
-      tx.id,
-    ])
-    if (user) {
-      update(
-        'users',
-        user.id,
-        u => ({ coins: Math.max(0, u.coins - coins), spent: Math.max(0, u.spent - tx.amount) }),
-        [`Deducted ${num(Math.min(coins, user.coins))} coins for refund ${tx.id}`, user.id],
-      )
+  const run = async (fn, done) => {
+    setBusy(true)
+    try {
+      const r = await fn()
+      toast(done(r))
+      res.reload()
+      detail.reload()
+      userRes.reload()
+    } catch (e) {
+      toast(errorText(e), 'error')
+    } finally {
+      setBusy(false)
     }
-    toast(`Refunded ${inr(tx.amount)} to ${tx.userName}`)
   }
 
-  const markSuccess = () => {
-    const coins = total(tx)
-    update('transactions', tx.id, { status: 'success', handledBy: me?.name, resolvedAt: stamp() }, [
-      `Marked payment successful · credited ${num(coins)} coins`,
-      tx.id,
-    ])
-    if (user) {
-      update('users', user.id, u => ({ coins: u.coins + coins, spent: u.spent + tx.amount }), [
-        `Credited ${num(coins)} coins for payment ${tx.id}`,
-        user.id,
-      ])
-    }
-    toast(`Payment marked successful · ${num(coins)} coins credited`)
-  }
+  const refund = reason =>
+    run(
+      () => api.post(`/admin/finance/transactions/${tx.id}/refund`, { reason }),
+      r => `Refunded ${inr(tx.amount)} to ${tx.userName} · ${num(r.deductedCoins)} coins removed`,
+    )
 
-  const markFailed = () => {
-    update('transactions', tx.id, { status: 'failed', handledBy: me?.name, resolvedAt: stamp() }, ['Marked payment failed', tx.id])
-    toast('Payment marked failed')
-  }
+  const markSuccess = () =>
+    run(
+      () => api.post(`/admin/finance/transactions/${tx.id}/success`),
+      r => `Payment marked successful · ${num(r.coins)} coins credited`,
+    )
+
+  const markFailed = () => run(() => api.post(`/admin/finance/transactions/${tx.id}/failed`), () => 'Payment marked failed')
 
   const columns = [
-    { key: 'id', label: 'ID', sort: t => t.id, render: t => <span className="a-mono">{t.id}</span> },
+    { key: 'id', label: 'ID', render: t => <span className="a-mono">{t.id}</span> },
     {
       key: 'user',
       label: 'User',
-      sort: t => t.userName,
       render: t => <Who src={t.userAvatar} name={t.userName} sub={t.userId} size={32} to={`/admin/users/${t.userId}`} />,
     },
-    { key: 'coins', label: 'Coins', align: 'right', sort: total, render: t => <Coins t={t} /> },
-    { key: 'amount', label: 'Amount', align: 'right', sort: t => t.amount, render: t => <b className="a-strong">{inr(t.amount)}</b> },
-    { key: 'method', label: 'Method', sort: t => t.method },
+    { key: 'coins', label: 'Coins', align: 'right', serverSort: 'coins', render: t => <Coins t={t} /> },
+    { key: 'amount', label: 'Amount', align: 'right', serverSort: 'amount', render: t => <b className="a-strong">{inr(t.amount)}</b> },
+    { key: 'method', label: 'Method', render: t => t.method || '—' },
     { key: 'gatewayRef', label: 'Gateway ref', render: t => <span className="a-mono a-muted">{t.gatewayRef}</span> },
     {
       key: 'ts',
       label: 'When',
-      sort: t => t.ts,
+      serverSort: 'ts',
       render: t => (
         <span className="a-nowrap" title={dateTime(t.ts)}>
           {ago(t.ts)}
         </span>
       ),
     },
-    { key: 'status', label: 'Status', sort: t => t.status, render: t => <Status value={t.status} /> },
+    { key: 'status', label: 'Status', render: t => <Status value={t.status} /> },
   ]
 
   const afterRefund = tx && user ? Math.max(0, user.coins - total(tx)) : 0
@@ -172,10 +161,10 @@ export default function TransactionsPage() {
       />
 
       <div className="a-grid c4">
-        <Stat label="Successful amount" value={inr(sumAmount(success))} sub={`${num(success.length)} payments`} icon={IndianRupee} />
-        <Stat label="Transactions" value={num(base.length)} sub={pending.length ? `${num(pending.length)} pending` : 'none pending'} icon={ReceiptText} />
-        <Stat label="Failed" value={pct(base.length ? (failed.length / base.length) * 100 : 0, 1)} sub={`${num(failed.length)} of ${num(base.length)}`} icon={CircleX} />
-        <Stat label="Refunded" value={inr(sumAmount(refunded))} sub={`${num(refunded.length)} payments`} icon={RotateCcw} />
+        <Stat label="Successful amount" value={inr(success.amount)} sub={`${num(success.count)} payments`} icon={IndianRupee} />
+        <Stat label="Transactions" value={num(allCount)} sub={pending.count ? `${num(pending.count)} pending` : 'none pending'} icon={ReceiptText} />
+        <Stat label="Failed" value={pct(allCount ? (failed.count / allCount) * 100 : 0, 1)} sub={`${num(failed.count)} of ${num(allCount)}`} icon={CircleX} />
+        <Stat label="Refunded" value={inr(refunded.amount)} sub={`${num(refunded.count)} payments`} icon={RotateCcw} />
       </div>
 
       <div>
@@ -183,15 +172,15 @@ export default function TransactionsPage() {
           value={tab}
           onChange={setTab}
           tabs={[
-            { value: 'all', label: 'All', count: base.length },
-            ...STATUSES.map(s => ({ value: s, label: s[0].toUpperCase() + s.slice(1), count: by(s).length })),
+            { value: 'all', label: 'All', count: allCount },
+            ...STATUSES.map(s => ({ value: s, label: s[0].toUpperCase() + s.slice(1), count: t(s).count })),
           ]}
         />
         <Card padded={false}>
           <DataTable
             rows={rows}
             columns={columns}
-            initialSort={{ key: 'ts', dir: 'desc' }}
+            {...serverTable(pg, res)}
             onRowClick={t => setOpenId(t.id)}
             empty={<Empty title="No transactions" text="Nothing matches these filters." />}
             toolbar={
@@ -215,21 +204,22 @@ export default function TransactionsPage() {
         onClose={() => setOpenId(null)}
         footer={
           tx?.status === 'success' ? (
-            <Button variant="soft-danger" icon={RotateCcw} onClick={() => setConfirm('refund')}>
+            <Button variant="soft-danger" icon={RotateCcw} disabled={busy} onClick={() => setConfirm('refund')}>
               Refund
             </Button>
           ) : tx?.status === 'pending' ? (
             <>
-              <Button variant="soft-danger" icon={CircleX} onClick={() => setConfirm('failed')}>
+              <Button variant="soft-danger" icon={CircleX} disabled={busy} onClick={() => setConfirm('failed')}>
                 Mark failed
               </Button>
-              <Button variant="primary" icon={CircleCheck} onClick={() => setConfirm('success')}>
+              <Button variant="primary" icon={CircleCheck} disabled={busy} onClick={() => setConfirm('success')}>
                 Mark as successful
               </Button>
             </>
           ) : null
         }
       >
+        {openId && !tx ? <Loading /> : null}
         {tx ? (
           <div className="a-stack" style={{ gap: 18 }}>
             <div className="a-row between">
@@ -251,11 +241,11 @@ export default function TransactionsPage() {
               <dt>Amount</dt>
               <dd>{inr(tx.amount)}</dd>
               <dt>Method</dt>
-              <dd>{tx.method}</dd>
+              <dd>{tx.method || '—'}</dd>
               <dt>Gateway</dt>
               <dd>{tx.gateway}</dd>
               <dt>Gateway ref</dt>
-              <dd className="a-mono">{tx.gatewayRef}</dd>
+              <dd className="a-mono">{tx.gatewayRef || '—'}</dd>
               <dt>Created</dt>
               <dd>{dateTime(tx.ts)}</dd>
               {tx.refundReason ? (
@@ -282,7 +272,7 @@ export default function TransactionsPage() {
                 Check this payment in the Razorpay dashboard before settling it. Marking it successful credits {num(total(tx))} coins to the user.
               </p>
             ) : null}
-            {!user ? (
+            {userMissing ? (
               <p className="a-small a-warning a-row" style={{ gap: 6 }}>
                 <TriangleAlert size={14} /> This user no longer exists, so no coin balance will change.
               </p>

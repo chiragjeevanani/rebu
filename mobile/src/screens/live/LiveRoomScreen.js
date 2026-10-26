@@ -2,6 +2,7 @@
 // The host can take up to 2 guests on video (shown as small windows on the right).
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  Alert,
   Image,
   KeyboardAvoidingView,
   Pressable,
@@ -35,50 +36,27 @@ import Txt from '../../components/Txt';
 import GiftSheet from '../../components/GiftSheet';
 import { CoinIcon } from '../../components/CoinPill';
 import { BIG_GIFT_COINS, useGiftFx } from '../../components/GiftFx';
-import { compact, hostStats } from '../../components/Live';
+import { compact } from '../../components/Live';
 import { useSecureScreen } from '../../utils/secure';
+import { RtcSurfaceView, RtcTextureView } from 'react-native-agora';
+import { del, get, post } from '../../api/client';
+import { useSocketEvent } from '../../api/socket';
+import { useAgoraChannel } from '../../media/agora';
 
 const MAX_GUESTS = 2;
 const GOAL = 10000;
-
-// Demo viewers and lines so the room feels live until the backend exists.
-const VIEWERS = [
-  { name: 'Rahul', photo: 'https://i.pravatar.cc/200?img=11' },
-  { name: 'Vikram', photo: 'https://i.pravatar.cc/200?img=13' },
-  { name: 'Karan', photo: 'https://i.pravatar.cc/200?img=14' },
-  { name: 'Aditya', photo: 'https://i.pravatar.cc/200?img=15' },
-  { name: 'Sahil', photo: 'https://i.pravatar.cc/200?img=33' },
-  { name: 'Dev', photo: 'https://i.pravatar.cc/200?img=52' },
-];
-const LINES = [
-  'Hi 👋',
-  'Hello from Pune!',
-  'Your smile is so cute 😊',
-  'Please accept my join request 🙏',
-  'Which song are you listening to?',
-  'Good evening everyone',
-  'Miss you yaar ❤️',
-  'Where are you from?',
-  'Nice dress today ✨',
-];
-const pick = (list, n) => list[n % list.length];
 
 export default function LiveRoomScreen({ navigation, route }) {
   useSecureScreen();
   const { host } = route.params;
   const insets = useSafeAreaInsets();
   const fx = useGiftFx();
-  const {
-    user,
-    following,
-    toggleFollow,
-    spendCoins,
-    getCoins,
-    addTransaction,
-  } = useApp();
-  const { viewers: startViewers, diamonds } = hostStats(host);
-
-  const [viewers, setViewers] = useState(startViewers || 12);
+  const { user, following, toggleFollow, setCoinsFromServer } = useApp();
+  const liveId = route.params.liveId || host.liveId;
+  const [live, setLive] = useState(null);
+  const [agora, setAgora] = useState(null);
+  const [viewers, setViewers] = useState(0);
+  const [diamonds, setDiamonds] = useState(0);
   const [chat, setChat] = useState([
     {
       id: 'w',
@@ -89,140 +67,188 @@ export default function LiveRoomScreen({ navigation, route }) {
   const [typing, setTyping] = useState(false);
   const [text, setText] = useState('');
   const [giftSheet, setGiftSheet] = useState(false);
-  const [goal, setGoal] = useState(2450);
-  // One viewer already on video so the guest layout is visible.
-  const [guests, setGuests] = useState([{ ...VIEWERS[1], id: 'g1' }]);
+  const [goal, setGoal] = useState(0);
+  const [guests, setGuests] = useState([]);
   const [request, setRequest] = useState('idle'); // idle | pending
   const [muted, setMuted] = useState(false);
-  const tick = useRef(0);
   const scroll = useRef(null);
+  const left = useRef(false);
+
+  const rtc = useAgoraChannel(agora, { video: live?.mode !== 'audio' });
+  const ownerUid = live?.ownerUid;
+  const hostUid = rtc.remoteUids.includes(ownerUid)
+    ? ownerUid
+    : rtc.remoteUids[0];
 
   const followingHost = following.includes(host.id);
   const meOnCall = guests.some(g => g.me);
-  const seatsFull = guests.length >= MAX_GUESTS;
+  const maxGuests = live?.maxGuests || MAX_GUESTS;
+  const seatsFull = guests.length >= maxGuests;
 
   const say = entry =>
     setChat(c => [
-      ...c.slice(-30),
-      { id: `${Date.now()}${Math.random()}`, ...entry },
+      ...c.slice(-40),
+      { id: entry.id || `${Date.now()}${Math.random()}`, ...entry },
     ]);
+  const fromServer = m =>
+    m.kind === 'gift'
+      ? { id: m.id, name: m.user?.name, photo: m.user?.photo, gift: m.gift }
+      : m.kind === 'system'
+      ? { id: m.id, system: true, text: m.text }
+      : { id: m.id, name: m.user?.name, photo: m.user?.photo, text: m.text };
+  const toGuests = list =>
+    (list || []).map(g => ({
+      id: g.user.id,
+      name: g.user.id === user.id ? 'You' : g.user.name,
+      photo: g.user.photo,
+      me: g.user.id === user.id,
+      uid: g.uid,
+      muted: g.muted,
+    }));
 
-  // Simulated room activity.
+  // Join: the server charges premium tickets once, returns a viewer token.
   useEffect(() => {
-    const t = setInterval(() => {
-      tick.current += 1;
-      const n = tick.current;
-      const v = pick(VIEWERS, n * 3);
-      if (n % 4 === 0) {
-        say({ name: v.name, photo: v.photo, joined: true });
-        setViewers(x => x + 1);
-      } else {
-        say({ name: v.name, photo: v.photo, text: pick(LINES, n * 7) });
+    if (!liveId) return;
+    (async () => {
+      try {
+        const j = await post(`/lives/${liveId}/join`);
+        if (typeof j.balance === 'number') setCoinsFromServer(j.balance);
+        const { live: d } = await get(`/lives/${liveId}`);
+        setLive({ ...j.live, ...d });
+        setViewers(d.viewers);
+        setDiamonds(d.diamonds);
+        setGuests(toGuests(d.guests));
+        setChat(c => [...c, ...(d.chat || []).map(fromServer)]);
+        setAgora(j.agora);
+      } catch (e) {
+        if (e.code === 'insufficient_coins') {
+          navigation.replace('Wallet');
+          return;
+        }
+        Alert.alert('Live unavailable', e.message);
+        navigation.goBack();
       }
-    }, 2600);
-    return () => clearInterval(t);
-  }, []);
-
-  // Host accepts the join request (demo: after a short wait).
-  useEffect(() => {
-    if (request !== 'pending') return;
-    const t = setTimeout(() => {
-      setRequest('idle');
-      if (guests.length >= MAX_GUESTS) {
-        say({
-          system: true,
-          text: 'Both guest seats are taken. Try again in a bit.',
-        });
-        return;
-      }
-      setGuests(g => [
-        ...g,
-        { id: 'me', me: true, name: 'You', photo: user.photos[0] },
-      ]);
-      say({
-        system: true,
-        text: `${host.name} accepted your request 🎉 You’re on video.`,
-      });
-    }, 3200);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [request]);
-
-  // Guests pay the host's video rate for every started minute on stage.
-  useEffect(() => {
-    if (!meOnCall) return;
-    const charge = () => {
-      if (!spendCoins(host.videoRate)) {
-        leave('You ran out of coins, so you left the call.');
-        return false;
-      }
-      addTransaction({
-        type: 'call',
-        title: `Live call · ${host.name}`,
-        sub: '1 min on stage',
-        amount: -host.videoRate,
-      });
-      return true;
+    })();
+    return () => {
+      if (!left.current) post(`/lives/${liveId}/leave`).catch(() => {});
     };
-    if (!charge()) return;
-    const t = setInterval(charge, 60000);
-    return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meOnCall]);
+  }, [liveId]);
 
-  const leave = note => {
-    setGuests(g => g.filter(x => !x.me));
+  const here = p => p?.liveId === liveId;
+  useSocketEvent(
+    'live:chat',
+    p =>
+      here(p) && p.message.user?.id !== user.id && say(fromServer(p.message)),
+  );
+  useSocketEvent('live:viewer_joined', p => {
+    if (!here(p)) return;
+    setViewers(p.viewers);
+    if (p.user?.id !== user.id)
+      say({ name: p.user?.name, photo: p.user?.photo, joined: true });
+  });
+  useSocketEvent('live:viewer_left', p => here(p) && setViewers(p.viewers));
+  useSocketEvent('live:gift', p => {
+    if (!here(p)) return;
+    setDiamonds(p.diamonds);
+    setGoal(g => g + (p.gift?.coins || 0));
+    if (p.from?.id !== user.id)
+      say({ name: p.from?.name, photo: p.from?.photo, gift: p.gift });
+  });
+  useSocketEvent('live:guests', p => here(p) && setGuests(toGuests(p.guests)));
+  useSocketEvent('live:accepted', p => {
+    if (!here(p)) return;
+    setRequest('idle');
+    setAgora(p.agora); // publisher token: camera + mic on
+    say({
+      system: true,
+      text: `${host.name} accepted your request 🎉 You’re on video.`,
+    });
+  });
+  useSocketEvent('live:declined', p => {
+    if (!here(p)) return;
+    setRequest('idle');
+    say({
+      system: true,
+      text: `${host.name} can’t take you on video right now.`,
+    });
+  });
+  useSocketEvent('live:removed', p => {
+    if (!here(p)) return;
+    if (p.agora) setAgora(p.agora);
+    say({ system: true, text: 'You’re back to watching.' });
+  });
+  useSocketEvent('live:ended', p => {
+    if (!here(p)) return;
+    left.current = true;
+    Alert.alert('Live ended', `${host.name} ended the live.`);
+    navigation.goBack();
+  });
+
+  const leave = async note => {
+    await post(`/lives/${liveId}/guests/${user.id}/remove`).catch(() => {});
     say({ system: true, text: note || 'You left the call.' });
   };
 
-  const askToJoin = () => {
-    if (request === 'pending') {
-      setRequest('idle');
-      say({ system: true, text: 'Join request cancelled.' });
-      return;
+  const askToJoin = async () => {
+    try {
+      if (request === 'pending') {
+        await del(`/lives/${liveId}/requests`);
+        setRequest('idle');
+        say({ system: true, text: 'Join request cancelled.' });
+        return;
+      }
+      await post(`/lives/${liveId}/requests`);
+      setRequest('pending');
+      say({ system: true, text: `You asked to join ${host.name} on video.` });
+    } catch (e) {
+      say({ system: true, text: e.message });
     }
-    if (getCoins() < host.videoRate) {
-      navigation.navigate('Wallet');
-      return;
-    }
-    setRequest('pending');
-    say({
-      system: true,
-      text: `You asked to join · ${host.videoRate} coins/min once accepted.`,
-    });
   };
 
-  const sendGift = g => {
-    if (!spendCoins(g.coins)) {
-      navigation.navigate('Wallet');
-      return;
+  const sendGift = async g => {
+    try {
+      const r = await post('/gifts', {
+        toId: host.id,
+        giftKey: g.key,
+        context: { type: 'live', id: liveId },
+      });
+      setCoinsFromServer(r.balance);
+      onGiftSent(g);
+      if (g.coins >= BIG_GIFT_COINS) fx.play(g, { to: host.name });
+    } catch (e) {
+      if (e.code === 'insufficient_coins') navigation.navigate('Wallet');
+      else say({ system: true, text: e.message });
     }
-    addTransaction({
-      type: 'gift',
-      title: `Gift · ${g.name} to ${host.name}`,
-      sub: 'Live',
-      amount: -g.coins,
-    });
-    onGiftSent(g);
-    if (g.coins >= BIG_GIFT_COINS) fx.play(g, { to: host.name });
   };
-  const onGiftSent = g => {
-    setGoal(x => x + g.coins);
-    say({ name: 'You', photo: user.photos[0], gift: g });
-  };
+  const onGiftSent = g => say({ name: 'You', photo: user.photos[0], gift: g });
 
-  const send = () => {
-    if (!text.trim()) return;
-    say({ name: 'You', photo: user.photos[0], text: text.trim() });
+  const send = async () => {
+    const t = text.trim();
+    if (!t) return;
     setText('');
+    try {
+      await post(`/lives/${liveId}/chat`, { text: t });
+      say({ name: 'You', photo: user.photos[0], text: t });
+    } catch (e) {
+      setText(t);
+      say({ system: true, text: e.message });
+    }
   };
 
   return (
     <View style={styles.root}>
-      <Image
-        source={{ uri: host.photos?.[1] || host.photo }}
-        style={StyleSheet.absoluteFill}
-      />
+      {rtc.live && hostUid ? (
+        <RtcSurfaceView
+          canvas={{ uid: hostUid }}
+          style={StyleSheet.absoluteFill}
+        />
+      ) : (
+        <Image
+          source={{ uri: host.photos?.[1] || host.photo }}
+          style={StyleSheet.absoluteFill}
+        />
+      )}
       <LinearGradient
         colors={[
           'rgba(0,0,0,0.45)',
@@ -270,10 +296,23 @@ export default function LiveRoomScreen({ navigation, route }) {
         <View style={styles.guests}>
           {guests.map(g => (
             <View key={g.id} style={styles.guest}>
-              <Image
-                source={{ uri: g.photo }}
-                style={StyleSheet.absoluteFill}
-              />
+              {g.me && rtc.live ? (
+                <RtcTextureView
+                  canvas={{ uid: 0 }}
+                  style={StyleSheet.absoluteFill}
+                />
+              ) : rtc.live && g.uid && rtc.remoteUids.includes(g.uid) ? (
+                <RtcTextureView
+                  canvas={{ uid: g.uid }}
+                  style={StyleSheet.absoluteFill}
+                />
+              ) : (
+                // Photo until their video arrives.
+                <Image
+                  source={{ uri: g.photo }}
+                  style={StyleSheet.absoluteFill}
+                />
+              )}
               <View style={styles.guestName}>
                 <Txt style={styles.guestNameText}>{g.name}</Txt>
               </View>
@@ -288,7 +327,12 @@ export default function LiveRoomScreen({ navigation, route }) {
                   </Pressable>
                   <Pressable
                     style={styles.guestMic}
-                    onPress={() => setMuted(m => !m)}
+                    onPress={() =>
+                      setMuted(m => {
+                        rtc.setMuted(!m);
+                        return !m;
+                      })
+                    }
                     hitSlop={6}
                   >
                     {muted ? (
@@ -465,6 +509,8 @@ export default function LiveRoomScreen({ navigation, route }) {
         to={host.name}
         onClose={() => setGiftSheet(false)}
         onSend={onGiftSent}
+        toId={host.id}
+        context={{ type: 'live', id: liveId }}
         onRecharge={() => {
           setGiftSheet(false);
           navigation.navigate('Wallet');

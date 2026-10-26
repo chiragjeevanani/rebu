@@ -7,27 +7,28 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { CALLS, ME, TRANSACTIONS } from '../data/mock';
-import { ECONOMY, hostBalance } from '../data/economy';
+import { ME } from '../data/mock';
+import {
+  APP_VERSION,
+  del,
+  get,
+  loadToken,
+  patch,
+  post,
+  put,
+  setToken,
+  setUnauthorizedHandler,
+} from '../api/client';
+import { connectSocket, disconnectSocket, onSocket } from '../api/socket';
+import { refreshHosts } from '../api/hosts';
+import { hostBalance } from '../data/economy';
 
 const AppContext = createContext(null);
 
-const DEMO_CALLER = {
-  name: 'Rahul',
-  age: 27,
-  photo: 'https://i.pravatar.cc/800?img=11',
-};
-
-// Everything below is saved on the device so a restart keeps the session.
-const STORE_KEY = 'rebu.state.v1';
-// Demo: an application is "reviewed by admin" this long after submitting.
-const HOST_REVIEW_MS = 20000;
-// Demo payout progress: requested → processing → paid.
-const PAYOUT_PROCESSING_MS = 15000;
-const PAYOUT_PAID_MS = 60000;
-// Test hook: this agency code makes the demo review reject the application.
-const DEMO_REJECT_CODE = 'REJECT';
+// Device-only preferences (everything else lives on the server).
+const STORE_KEY = 'rebu.state.v2';
 
 export const HOST_RATE_TIERS = {
   video: [30, 40, 60, 80, 100, 150, 200, 300],
@@ -44,46 +45,65 @@ export const HOST_LEVEL_MAX = Object.fromEntries(
   HOST_LEVELS.map(l => [l.level, l.maxRate]),
 );
 
-const nowLabel = () => {
-  const d = new Date();
-  const h = d.getHours();
-  const m = String(d.getMinutes()).padStart(2, '0');
-  return `Today, ${h % 12 || 12}:${m} ${h < 12 ? 'AM' : 'PM'}`;
+// Server user → the shape screens already use (photos[0], age, vip…).
+const PLACEHOLDER = 'https://i.pravatar.cc/800?img=68';
+export function toAppUser(u) {
+  const age = u.dob
+    ? Math.floor((Date.now() - new Date(u.dob).getTime()) / (365.25 * 864e5))
+    : null;
+  return {
+    ...ME,
+    id: u.id || u._id,
+    phone: u.phone,
+    name: u.name || '',
+    gender: u.gender,
+    age,
+    dob: u.dob,
+    city: u.city || '',
+    bio: u.bio || '',
+    photos: u.photos?.length ? u.photos : [PLACEHOLDER],
+    verified: !!u.verified,
+    vip: u.vip?.until && new Date(u.vip.until) > new Date() ? u.vip.level : 0,
+    followers: u.followersCount || 0,
+    following: (u.following || []).length,
+    server: u,
+  };
+}
+
+const EMPTY_STORE = {
+  balance: null,
+  diamonds: 0,
+  vip: { level: 0, until: null },
+  royal: null,
+  owned: [],
+  equipped: {},
 };
 
 export function AppProvider({ children }) {
   const [authed, setAuthed] = useState(false);
   const [profileDone, setProfileDone] = useState(false);
   const [user, setUser] = useState(ME);
-  const [coins, setCoins] = useState(1450);
+  const [coins, setCoins] = useState(0);
   const [isHost, setIsHost] = useState(false);
-  // none | pending | approved
+  // none | pending | approved | rejected
   const [hostApp, setHostApp] = useState({ status: 'none' });
   const [hostRates, setHostRates] = useState({ video: 40, voice: 20 });
   const [hydrated, setHydrated] = useState(false);
+  const [config, setConfig] = useState(null); // GET /config (prices, gifts, levels…)
   const [hostOnline, setHostOnline] = useState(false);
   const [incomingCall, setIncomingCall] = useState(null);
-  const [callHistory, setCallHistory] = useState(CALLS);
-  const [transactions, setTransactions] = useState(TRANSACTIONS);
-  // Host money: one ledger entry per thing a user paid the host for.
+  // Host money (GET /host/*).
   const [earnings, setEarnings] = useState([]);
   const [withdrawals, setWithdrawals] = useState([]);
   const [payoutMethods, setPayoutMethods] = useState([]);
   const [hostAgency, setHostAgency] = useState(null);
-  const [liveSessions, setLiveSessions] = useState([]); // { ts, seconds }
-  const [hostTasks, setHostTasks] = useState({ day: '', claimed: [] });
-  // Social state (Moments, Rooms, Store, Tasks, Family)
-  const [following, setFollowing] = useState(['h5']);
+  const [hostInfo, setHostInfo] = useState(null); // GET /host/me
+  const [serverBalance, setServerBalance] = useState(null);
+  // Social (GET /store, /social/greeted, /notifications).
+  const [following, setFollowing] = useState([]);
   const [greeted, setGreeted] = useState([]);
-  const [likedMoments, setLikedMoments] = useState([]);
-  const [myMoments, setMyMoments] = useState([]);
-  const [myRooms, setMyRooms] = useState([]);
-  const [owned, setOwned] = useState([]);
-  const [equipped, setEquipped] = useState({});
-  const [vipLevel, setVipLevel] = useState(ME.vip || 0);
-  const [nobility, setNobility] = useState(null);
-  const [claimedTasks, setClaimedTasks] = useState([]);
-  const [family, setFamily] = useState(null);
+  const [store, setStore] = useState(EMPTY_STORE);
+  const [unread, setUnread] = useState(0);
   const [filters, setFilters] = useState({
     ageMin: 21,
     ageMax: 32,
@@ -97,92 +117,204 @@ export function AppProvider({ children }) {
   // Coins live in a ref too so per-minute billing reads the latest balance.
   const coinsRef = useRef(coins);
   coinsRef.current = coins;
+  const setCoinsFromServer = useCallback(n => {
+    coinsRef.current = n;
+    setCoins(n);
+  }, []);
 
-  // Demo: a host who goes online receives a call a few seconds later.
-  useEffect(() => {
-    if (!(isHost && hostOnline)) return;
-    const t = setTimeout(
-      () => setIncomingCall({ ...DEMO_CALLER, video: true }),
-      6000,
+  // Incoming calls for hosts arrive over the socket (server rings us).
+  useEffect(
+    () =>
+      onSocket('call:incoming', ({ call, caller }) =>
+        setIncomingCall({
+          ...caller,
+          photos: caller.photos?.length ? caller.photos : [caller.photo],
+          video: call.type === 'video',
+          call,
+        }),
+      ),
+    [],
+  );
+
+  // Availability lives on the server so users see the right online state.
+  const setHostOnlineRemote = useCallback(on => {
+    setHostOnline(on);
+    patch('/host/me', { online: on }).catch(() => setHostOnline(!on));
+  }, []);
+
+  // ---- Device preferences ---------------------------------------------------
+  const savedJson = JSON.stringify({ filters });
+
+  // Latest host application, as the server sees it.
+  const refreshHostApp = useCallback(async () => {
+    const r = await get('/host/application').catch(() => null);
+    const a = r?.application;
+    setHostApp(
+      a
+        ? {
+            status: a.status,
+            submittedAt: new Date(a.createdAt).getTime(),
+            approvedAt: a.reviewedAt ? new Date(a.reviewedAt).getTime() : null,
+            reviewedAt: a.reviewedAt ? new Date(a.reviewedAt).getTime() : null,
+            reasons: a.reasons || [],
+            data: { ...a, agency: a.agencyCode, photos: a.photos },
+          }
+        : { status: 'none' },
     );
-    return () => clearTimeout(t);
-  }, [isHost, hostOnline]);
+    return a;
+  }, []);
 
-  // ---- Persistence -------------------------------------------------------
-  const saved = {
-    authed,
-    profileDone,
-    user,
-    coins,
-    isHost,
-    hostApp,
-    hostRates,
-    callHistory,
-    transactions,
-    earnings,
-    withdrawals,
-    payoutMethods,
-    hostAgency,
-    liveSessions,
-    hostTasks,
-    following,
-    greeted,
-    likedMoments,
-    myMoments,
-    myRooms,
-    owned,
-    equipped,
-    vipLevel,
-    nobility,
-    claimedTasks,
-    family,
-    filters,
-  };
-  const setters = useRef({
-    authed: setAuthed,
-    profileDone: setProfileDone,
-    user: setUser,
-    coins: setCoins,
-    isHost: setIsHost,
-    hostApp: setHostApp,
-    hostRates: setHostRates,
-    callHistory: setCallHistory,
-    transactions: setTransactions,
-    earnings: setEarnings,
-    withdrawals: setWithdrawals,
-    payoutMethods: setPayoutMethods,
-    hostAgency: setHostAgency,
-    liveSessions: setLiveSessions,
-    hostTasks: setHostTasks,
-    following: setFollowing,
-    greeted: setGreeted,
-    likedMoments: setLikedMoments,
-    myMoments: setMyMoments,
-    myRooms: setMyRooms,
-    owned: setOwned,
-    equipped: setEquipped,
-    vipLevel: setVipLevel,
-    nobility: setNobility,
-    claimedTasks: setClaimedTasks,
-    family: setFamily,
-    filters: setFilters,
-  }).current;
+  // Host money from the server: balance, ledger, payout accounts, withdrawals.
+  const refreshHostMoney = useCallback(async () => {
+    const [me, earn, wd, pm] = await Promise.all([
+      get('/host/me'),
+      get('/host/earnings?range=all&limit=100'),
+      get('/host/withdrawals?limit=50'),
+      get('/host/payout-methods'),
+    ]).catch(() => []);
+    if (!me) return;
+    setHostInfo(me);
+    setServerBalance(me.balance);
+    setHostRates(me.host.rates);
+    setHostOnline(!!me.host.online);
+    setHostAgency(me.agency?.code || null);
+    setEarnings(
+      earn.items.map(e => ({
+        ...e,
+        from: e.fromName || 'User',
+        // Server amounts are final; split() uses them as-is.
+        agencyAmount: e.agency,
+      })),
+    );
+    setWithdrawals(wd.items);
+    setPayoutMethods(pm.items);
+  }, []);
+
+  /** Items, VIP, royal club, diamonds. Purchases return the same shape. */
+  const applyStore = useCallback(
+    s => {
+      setStore({ ...EMPTY_STORE, ...s });
+      if (typeof s.balance === 'number') setCoinsFromServer(s.balance);
+    },
+    [setCoinsFromServer],
+  );
+  const refreshStore = useCallback(
+    () =>
+      get('/store')
+        .then(applyStore)
+        .catch(() => {}),
+    [applyStore],
+  );
+
+  const refreshUnread = useCallback(
+    () =>
+      get('/notifications?limit=1')
+        .then(r => setUnread(r.unread))
+        .catch(() => {}),
+    [],
+  );
+
+  // ---- Server session ----------------------------------------------------
+  const applyServerUser = useCallback(
+    u => {
+      setUser(toAppUser(u));
+      setCoinsFromServer(u.coins);
+      setProfileDone(!!u.profileDone);
+      setIsHost(!!u.host?.approved);
+      if (u.host?.approved) {
+        setHostRates(u.host.rates);
+        setHostOnline(!!u.host.online);
+      }
+      setFollowing((u.following || []).map(String));
+    },
+    [setCoinsFromServer],
+  );
+
+  const refreshMe = useCallback(async () => {
+    const { user: u } = await get('/me');
+    applyServerUser(u);
+    return u;
+  }, [applyServerUser]);
+
+  const endSession = useCallback(async () => {
+    disconnectSocket();
+    await setToken(null);
+    setAuthed(false);
+    setProfileDone(false);
+    setHostOnline(false);
+    setIncomingCall(null);
+    setStore(EMPTY_STORE);
+    setGreeted([]);
+    setUnread(0);
+    setEarnings([]);
+    setWithdrawals([]);
+    setPayoutMethods([]);
+    setHostInfo(null);
+    setServerBalance(null);
+  }, []);
+
+  /** Everything a signed-in session loads once. */
+  const loadSession = useCallback(() => {
+    refreshHostApp();
+    refreshHosts();
+    refreshStore();
+    refreshUnread();
+    get('/social/greeted')
+      .then(r => setGreeted(r.ids))
+      .catch(() => {});
+    // Tell the server which app build this is (push token comes with FCM).
+    put('/me/device', { platform: Platform.OS, appVersion: APP_VERSION }).catch(
+      () => {},
+    );
+  }, [refreshHostApp, refreshStore, refreshUnread]);
+
+  /** After OTP verify: store the token, load the profile, open the socket. */
+  const startSession = useCallback(
+    async (token, u) => {
+      await setToken(token);
+      connectSocket(token);
+      applyServerUser(u);
+      setAuthed(true);
+      loadSession();
+    },
+    [applyServerUser, loadSession],
+  );
+
+  const [hydratedSession, setHydratedSession] = useState(false);
+  const [hydratedLocal, setHydratedLocal] = useState(false);
+  useEffect(() => {
+    setHydrated(hydratedSession && hydratedLocal);
+  }, [hydratedSession, hydratedLocal]);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => endSession());
+    get('/config')
+      .then(setConfig)
+      .catch(() => {});
+    (async () => {
+      const t = await loadToken();
+      if (!t) return;
+      try {
+        const { user: u } = await get('/me');
+        connectSocket(t);
+        applyServerUser(u);
+        setAuthed(true);
+        loadSession();
+      } catch (e) {
+        if (e.status === 401 || e.status === 403) await setToken(null);
+      }
+    })().finally(() => setHydratedSession(true));
+  }, [applyServerUser, endSession, loadSession]);
 
   useEffect(() => {
     AsyncStorage.getItem(STORE_KEY)
       .then(raw => {
-        if (!raw) return;
-        const data = JSON.parse(raw);
-        Object.keys(setters).forEach(k => {
-          if (data[k] !== undefined) setters[k](data[k]);
-        });
-        if (typeof data.coins === 'number') coinsRef.current = data.coins;
+        const data = raw ? JSON.parse(raw) : null;
+        if (data?.filters) setFilters(data.filters);
       })
       .catch(() => {})
-      .finally(() => setHydrated(true));
-  }, [setters]);
-
-  const savedJson = JSON.stringify(saved);
+      .finally(() => setHydratedLocal(true));
+  }, []);
   useEffect(() => {
     if (!hydrated) return;
     const t = setTimeout(
@@ -192,224 +324,194 @@ export function AppProvider({ children }) {
     return () => clearTimeout(t);
   }, [hydrated, savedJson]);
 
-  // ---- Host application ----------------------------------------------------
-  const addEarning = useCallback(
-    rec =>
-      setEarnings(list => [
-        {
-          id: `e${Date.now()}${Math.random().toString(36).slice(2, 6)}`,
-          ts: Date.now(),
-          status: 'settled',
-          ...rec,
-        },
-        ...list,
-      ]),
-    [],
-  );
-
-  const submitHostApp = useCallback(data => {
-    setHostApp({ status: 'pending', submittedAt: Date.now(), data });
-    if (data.rates) setHostRates(data.rates);
-  }, []);
-
-  // Demo review: approve a pending application shortly after it's submitted.
+  // Host money follows the server: load on sign-in, refresh on anything that pays.
   useEffect(() => {
-    if (hostApp.status !== 'pending') return;
-    const wait = Math.max(0, hostApp.submittedAt + HOST_REVIEW_MS - Date.now());
-    const t = setTimeout(() => {
-      if (hostApp.data?.agency === DEMO_REJECT_CODE) {
-        setHostApp(a => ({
-          ...a,
-          status: 'rejected',
-          reviewedAt: Date.now(),
-          reasons: [
-            'Your selfie didn’t clearly match your profile photos.',
-            'The ID photo was blurry — all four corners must be readable.',
-          ],
-        }));
-        return;
-      }
-      setHostApp(a => ({ ...a, status: 'approved', approvedAt: Date.now() }));
-      setHostAgency(hostApp.data?.agency || null);
-      setIsHost(true);
-      addEarning({
-        source: 'bonus',
-        from: 'REBU',
-        detail: 'New host welcome bonus',
-        coins: ECONOMY.welcomeBonusCoins,
-      });
-    }, wait);
-    return () => clearTimeout(t);
-  }, [hostApp, addEarning]);
+    if (!authed || !isHost) return;
+    refreshHostMoney();
+    let t = null;
+    const soon = () => {
+      clearTimeout(t);
+      t = setTimeout(refreshHostMoney, 800);
+    };
+    const offs = [
+      'call:ended',
+      'gift:received',
+      'chat:message',
+      'live:gift',
+      'withdrawal:update',
+      'dispute:update',
+    ].map(ev => onSocket(ev, soon));
+    return () => {
+      clearTimeout(t);
+      offs.forEach(off => off());
+    };
+  }, [authed, isHost, refreshHostMoney]);
 
-  // Demo payouts move along on their own (finance team on the backend).
+  // Server pushes that change the wallet or the inbox.
   useEffect(() => {
-    const open = withdrawals.filter(
-      w => w.status === 'requested' || w.status === 'processing',
-    );
-    if (!open.length) return;
-    const now = Date.now();
-    const next = Math.min(
-      ...open.map(w =>
-        w.status === 'requested'
-          ? w.ts + PAYOUT_PROCESSING_MS
-          : w.ts + PAYOUT_PAID_MS,
-      ),
-    );
-    const t = setTimeout(
-      () =>
-        setWithdrawals(list =>
-          list.map(w => {
-            const age = Date.now() - w.ts;
-            if (w.status === 'requested' && age >= PAYOUT_PROCESSING_MS)
-              return { ...w, status: 'processing' };
-            if (w.status === 'processing' && age >= PAYOUT_PAID_MS)
-              return { ...w, status: 'paid', paidAt: Date.now() };
-            return w;
-          }),
-        ),
-      Math.max(0, next - now) + 50,
-    );
-    return () => clearTimeout(t);
-  }, [withdrawals]);
+    const balance = p => {
+      if (typeof p?.balance === 'number') setCoinsFromServer(p.balance);
+    };
+    const offs = [
+      onSocket('call:tick', balance),
+      onSocket('call:ended', balance),
+      onSocket('wallet:update', balance),
+      onSocket('notification:new', () => setUnread(n => n + 1)),
+      onSocket('host:application', () => {
+        refreshMe().catch(() => {});
+        refreshHostApp();
+      }),
+    ];
+    return () => offs.forEach(off => off());
+  }, [refreshMe, refreshHostApp, setCoinsFromServer]);
+
+  // ---- Host ---------------------------------------------------------------
+  const addEarning = useCallback(() => {
+    refreshHostMoney();
+  }, [refreshHostMoney]);
 
   // Level follows total connected call minutes.
   const callMinutes = useMemo(
     () =>
+      hostInfo?.callMinutes ??
       earnings
         .filter(e => e.source === 'video' || e.source === 'voice')
         .reduce((n, e) => n + (e.minutes || 0), 0),
-    [earnings],
+    [earnings, hostInfo],
   );
-  const hostLevel = HOST_LEVELS.filter(l => callMinutes >= l.minutes).pop()
-    .level;
-
-  const addLiveSession = useCallback(
-    seconds => setLiveSessions(list => [{ ts: Date.now(), seconds }, ...list]),
-    [],
-  );
+  const hostLevel =
+    hostInfo?.level ??
+    HOST_LEVELS.filter(l => callMinutes >= l.minutes).pop().level;
 
   const balance = useMemo(
-    () => hostBalance(earnings, withdrawals),
-    [earnings, withdrawals],
+    () => serverBalance || hostBalance(earnings, withdrawals),
+    [serverBalance, earnings, withdrawals],
   );
 
-  const requestWithdrawal = useCallback((amount, method) => {
-    const fee = Math.round((amount * ECONOMY.withdrawFee) / 100);
-    const w = {
-      id: `w${Date.now()}`,
-      ts: Date.now(),
-      amount,
-      fee,
-      net: amount - fee,
-      method,
-      status: 'requested',
-    };
-    setWithdrawals(list => [w, ...list]);
-    return w;
+  const requestWithdrawal = useCallback(async (amount, methodId) => {
+    const r = await post('/host/withdrawals', { amount, methodId });
+    setServerBalance(r.balance);
+    setWithdrawals(list => [r.withdrawal, ...list]);
+    return r.withdrawal;
   }, []);
 
   const reportEarning = useCallback(
-    (id, reason) =>
-      setEarnings(list =>
-        list.map(e =>
-          e.id === id ? { ...e, status: 'review', reportReason: reason } : e,
-        ),
-      ),
-    [],
+    async (id, reason) => {
+      await post(`/host/earnings/${id}/report`, { reason });
+      await refreshHostMoney();
+    },
+    [refreshHostMoney],
   );
 
-  const spendCoins = useCallback(n => {
-    if (coinsRef.current < n) return false;
-    coinsRef.current -= n;
-    setCoins(c => c - n);
+  const addPayoutMethod = useCallback(async m => {
+    const r = await post('/host/payout-methods', m);
+    setPayoutMethods(list => [...list, r.method]);
+    return r.method;
+  }, []);
+
+  const removePayoutMethod = useCallback(async id => {
+    await del(`/host/payout-methods/${id}`);
+    setPayoutMethods(list => list.filter(x => x.id !== id));
+  }, []);
+
+  const saveHostRates = useCallback(async rates => {
+    const r = await patch('/host/me', { rates });
+    setHostRates(r.host.rates);
+  }, []);
+
+  const joinAgency = useCallback(async code => {
+    if (!code) {
+      await del('/host/agency');
+      setHostAgency(null);
+      return;
+    }
+    const r = await post('/host/agency', { code });
+    setHostAgency(r.agency.code);
+  }, []);
+
+  // ---- Store ----------------------------------------------------------------
+  const storeCall = useCallback(
+    async (path, body) => {
+      const r = await post(path, body);
+      applyStore(r);
+      refreshMe().catch(() => {});
+      return r;
+    },
+    [applyStore, refreshMe],
+  );
+  const buyItem = useCallback(
+    id => storeCall(`/store/items/${id}/buy`),
+    [storeCall],
+  );
+  const equipItem = useCallback(
+    (category, itemId) => storeCall('/store/equip', { category, itemId }),
+    [storeCall],
+  );
+  const buyVip = useCallback(
+    level => storeCall('/store/vip', { level }),
+    [storeCall],
+  );
+  const buyRoyal = useCallback(
+    key => storeCall('/store/royal', { key }),
+    [storeCall],
+  );
+  const exchangeDiamonds = useCallback(
+    diamonds => storeCall('/store/diamonds/exchange', { diamonds }),
+    [storeCall],
+  );
+
+  const vipLevel = store.vip?.level || 0;
+  const nobility = useMemo(
+    () =>
+      store.royal
+        ? (config?.royalClub || []).find(t => t.key === store.royal.key) || {
+            key: store.royal.key,
+          }
+        : null,
+    [store.royal, config],
+  );
+  const owned = useMemo(() => store.owned.map(o => o.itemId), [store.owned]);
+
+  // ---- Social -----------------------------------------------------------------
+  /** Free "Say hi" (once per person). Resolves true when sent. */
+  const greet = useCallback(async (id, text) => {
+    try {
+      await post(`/social/greet/${id}`, text ? { text } : {});
+    } catch (e) {
+      if (e.code !== 'already_greeted') throw e;
+    }
+    setGreeted(g => (g.includes(id) ? g : [...g, id]));
     return true;
   }, []);
 
-  const addCoins = useCallback(n => {
-    coinsRef.current += n;
-    setCoins(c => c + n);
+  // Optimistic: flip locally, then tell the server (roll back if it fails).
+  const followingRef = useRef(following);
+  followingRef.current = following;
+  const toggleFollow = useCallback(id => {
+    const on = !followingRef.current.includes(id);
+    setFollowing(l => (on ? [...l, id] : l.filter(x => x !== id)));
+    const path = `/me/following/${id}`;
+    (on ? post(path) : del(path)).catch(() =>
+      setFollowing(l => (on ? l.filter(x => x !== id) : [...l, id])),
+    );
   }, []);
-
-  const addCall = useCallback(
-    call =>
-      setCallHistory(list => [
-        { id: `k${Date.now()}`, time: nowLabel(), ...call },
-        ...list,
-      ]),
-    [],
-  );
-
-  const addTransaction = useCallback(
-    tx =>
-      setTransactions(list => [
-        { id: `t${Date.now()}`, time: nowLabel(), status: 'success', ...tx },
-        ...list,
-      ]),
-    [],
-  );
 
   const signOut = useCallback(() => {
-    setAuthed(false);
-    setProfileDone(false);
-    setHostOnline(false);
-    setIncomingCall(null);
-  }, []);
+    endSession();
+  }, [endSession]);
 
-  const deleteAccount = useCallback(() => {
-    // Backend call goes here; locally wipe everything back to a fresh install.
+  const deleteAccount = useCallback(async () => {
+    await del('/me');
     setUser(ME);
-    setCoins(0);
-    coinsRef.current = 0;
     setIsHost(false);
     setHostApp({ status: 'none' });
-    setEarnings([]);
-    setWithdrawals([]);
-    setPayoutMethods([]);
-    setHostAgency(null);
-    setLiveSessions([]);
-    setHostTasks({ day: '', claimed: [] });
-    setCallHistory([]);
-    setTransactions([]);
-    signOut();
-  }, [signOut]);
-
-  const toggleIn = setter => id =>
-    setter(list =>
-      list.includes(id) ? list.filter(x => x !== id) : [...list, id],
-    );
-  const toggleFollow = useMemo(() => toggleIn(setFollowing), []);
-  const toggleLike = useMemo(() => toggleIn(setLikedMoments), []);
+    await endSession();
+  }, [endSession]);
 
   const value = useMemo(
     () => ({
-      following,
-      greeted,
-      likedMoments,
-      myMoments,
-      myRooms,
-      owned,
-      equipped,
-      vipLevel,
-      nobility,
-      claimedTasks,
-      family,
-      toggleFollow,
-      toggleLike,
-      greet: id => setGreeted(g => (g.includes(id) ? g : [...g, id])),
-      addMoment: m => setMyMoments(list => [m, ...list]),
-      addRoom: r => setMyRooms(list => [r, ...list]),
-      buyItem: id => setOwned(o => (o.includes(id) ? o : [...o, id])),
-      equipItem: (category, id) =>
-        setEquipped(e => ({
-          ...e,
-          [category]: e[category] === id ? null : id,
-        })),
-      setVipLevel,
-      setNobility,
-      claimTask: id => setClaimedTasks(c => [...c, id]),
-      setFamily,
       hydrated,
+      config,
       authed,
       profileDone,
       user,
@@ -419,44 +521,62 @@ export function AppProvider({ children }) {
       hostRates,
       hostLevel,
       callMinutes,
-      liveSessions,
-      addLiveSession,
-      hostTasks,
-      setHostTasks,
       hostOnline,
       incomingCall,
-      callHistory,
-      transactions,
       earnings,
       withdrawals,
       payoutMethods,
       hostAgency,
+      hostInfo,
       balance,
       filters,
+      following,
+      greeted,
+      store,
+      vipLevel,
+      nobility,
+      owned,
+      equipped: store.equipped || {},
+      diamonds: store.diamonds || 0,
+      unread,
+      startSession,
+      refreshMe,
+      refreshHostApp,
+      refreshHostMoney,
+      refreshStore,
+      refreshUnread,
+      setUnread,
+      applyServerUser,
+      setCoinsFromServer,
+      getCoins: () => coinsRef.current,
       setUser,
-      setHostRates,
-      submitHostApp,
       setFilters,
       setIsHost,
-      setHostOnline,
+      setHostOnline: setHostOnlineRemote,
       setIncomingCall,
-      setHostAgency,
+      setHostRates: saveHostRates,
+      setHostAgency: joinAgency,
       setPayoutMethods,
       addEarning,
       requestWithdrawal,
+      addPayoutMethod,
+      removePayoutMethod,
+      reportEarning,
+      buyItem,
+      equipItem,
+      buyVip,
+      buyRoyal,
+      exchangeDiamonds,
+      greet,
+      toggleFollow,
       signIn: () => setAuthed(true),
       completeProfile: () => setProfileDone(true),
       signOut,
       deleteAccount,
-      spendCoins,
-      addCoins,
-      getCoins: () => coinsRef.current,
-      addCall,
-      addTransaction,
-      reportEarning,
     }),
     [
       hydrated,
+      config,
       authed,
       profileDone,
       user,
@@ -466,42 +586,47 @@ export function AppProvider({ children }) {
       hostRates,
       hostLevel,
       callMinutes,
-      liveSessions,
-      addLiveSession,
-      hostTasks,
-      submitHostApp,
       hostOnline,
       incomingCall,
-      callHistory,
-      transactions,
       earnings,
       withdrawals,
       payoutMethods,
       hostAgency,
+      hostInfo,
       balance,
-      addEarning,
-      requestWithdrawal,
       filters,
       following,
       greeted,
-      likedMoments,
-      myMoments,
-      myRooms,
-      owned,
-      equipped,
+      store,
       vipLevel,
       nobility,
-      claimedTasks,
-      family,
+      owned,
+      unread,
+      startSession,
+      refreshMe,
+      refreshHostApp,
+      refreshHostMoney,
+      refreshStore,
+      refreshUnread,
+      applyServerUser,
+      setCoinsFromServer,
+      setHostOnlineRemote,
+      saveHostRates,
+      joinAgency,
+      addEarning,
+      requestWithdrawal,
+      addPayoutMethod,
+      removePayoutMethod,
+      reportEarning,
+      buyItem,
+      equipItem,
+      buyVip,
+      buyRoyal,
+      exchangeDiamonds,
+      greet,
       toggleFollow,
-      toggleLike,
       signOut,
       deleteAccount,
-      spendCoins,
-      addCoins,
-      addCall,
-      addTransaction,
-      reportEarning,
     ],
   );
 

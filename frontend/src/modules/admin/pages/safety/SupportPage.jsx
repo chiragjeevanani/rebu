@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, CheckCircle2, Clock, Inbox, LifeBuoy, RotateCcw, Send, UserCheck } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
-import { Avatar, Badge, Button, Card, Empty, PageHeader, SearchInput, Select, Status, Tabs, Textarea, Who } from '../../components/ui'
+import { useAdminEvent, useApi } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
+import { Avatar, Badge, Button, Card, Empty, ErrorState, Loading, PageHeader, SearchInput, Select, Status, Tabs, Textarea, Who } from '../../components/ui'
 import { ago, dateTime, label, num } from '../../utils/format'
 
 const CANNED = [
@@ -42,10 +44,15 @@ const CSS = `
 }
 `
 
+const SUPPORT_EVENTS = ['support:new', 'support:message']
+// The inbox shows the newest LIST_LIMIT tickets per tab; search narrows the rest.
+const LIST_LIMIT = 100
+
 const fromLink = f => (f.type === 'host' ? `/admin/hosts/${f.id}` : `/admin/users/${f.id}`)
 
-function TicketDetail({ t, me, onBack, update, toast }) {
+function TicketDetail({ t, me, onBack, onSaved, toast }) {
   const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
   const [canned, setCanned] = useState('')
   const threadRef = useRef(null)
   const myName = me?.name || 'Admin'
@@ -55,29 +62,40 @@ function TicketDetail({ t, me, onBack, update, toast }) {
     if (el) el.scrollTop = el.scrollHeight
   }, [t.messages.length])
 
-  const setStatus = (status, action) => {
-    update('tickets', t.id, { status, updated: Date.now() }, [action, t.id])
-    toast(`Ticket ${status === 'open' ? 'reopened' : `marked ${status}`}`)
+  // Every action returns the updated ticket.
+  const call = async (path, body, done) => {
+    setBusy(true)
+    try {
+      const r = await api.post(`/admin/support/${t.id}${path}`, body)
+      onSaved(r.ticket)
+      if (done) toast(done)
+      return true
+    } catch (e) {
+      toast(errorText(e), 'error')
+      return false
+    } finally {
+      setBusy(false)
+    }
   }
 
-  const send = () => {
+  const setStatus = status => call(status === 'open' ? '/reopen' : '/close', {}, status === 'open' ? 'Ticket reopened' : 'Ticket marked closed')
+
+  const setPriority = async priority => {
+    try {
+      const r = await api.patch(`/admin/support/${t.id}`, { priority })
+      onSaved(r.ticket)
+    } catch (e) {
+      toast(errorText(e), 'error')
+    }
+  }
+
+  const send = async () => {
     const body = text.trim()
-    if (!body) return
-    const ts = Date.now()
-    update(
-      'tickets',
-      t.id,
-      x => ({
-        messages: [...x.messages, { by: 'admin', name: myName, text: body, ts }],
-        status: 'pending',
-        updated: ts,
-        assignee: x.assignee || myName,
-      }),
-      ['Replied to support ticket', t.id],
-    )
-    setText('')
-    setCanned('')
-    toast('Reply sent')
+    if (!body || busy) return
+    if (await call('/reply', { text: body }, 'Reply sent')) {
+      setText('')
+      setCanned('')
+    }
   }
 
   return (
@@ -87,7 +105,7 @@ function TicketDetail({ t, me, onBack, update, toast }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <h3 style={{ overflowWrap: 'anywhere' }}>{t.subject}</h3>
           <p className="a-row wrap" style={{ gap: 8, marginTop: 6 }}>
-            <span className="a-mono">{t.id}</span>
+            <span className="a-mono">{t.id.slice(-8)}</span>
             <Status value={t.status} />
             <Badge>{t.category}</Badge>
             <span>Opened {dateTime(t.ts)}</span>
@@ -95,16 +113,16 @@ function TicketDetail({ t, me, onBack, update, toast }) {
         </div>
         <div className="a-row wrap" style={{ gap: 6, justifyContent: 'flex-end' }}>
           {t.status === 'open' ? (
-            <Button size="sm" icon={Clock} onClick={() => setStatus('pending', 'Marked ticket pending')}>
+            <Button size="sm" icon={Clock} disabled={busy} onClick={() => call('/pending', {}, 'Ticket marked pending')}>
               Mark pending
             </Button>
           ) : null}
           {t.status !== 'closed' ? (
-            <Button size="sm" icon={CheckCircle2} onClick={() => setStatus('closed', 'Closed support ticket')}>
+            <Button size="sm" icon={CheckCircle2} disabled={busy} onClick={() => setStatus('closed')}>
               Close
             </Button>
           ) : (
-            <Button size="sm" icon={RotateCcw} onClick={() => setStatus('open', 'Reopened support ticket')}>
+            <Button size="sm" icon={RotateCcw} disabled={busy} onClick={() => setStatus('open')}>
               Reopen
             </Button>
           )}
@@ -115,13 +133,13 @@ function TicketDetail({ t, me, onBack, update, toast }) {
         <div className="a-grid c3" style={{ alignItems: 'center' }}>
           <div>
             <div className="a-small a-muted" style={{ marginBottom: 6 }}>From</div>
-            <Who src={t.from.avatar} name={t.from.name} sub={`${label(t.from.type)} · ${t.from.id}`} size={32} to={fromLink(t.from)} />
+            <Who src={t.from.avatar} name={t.from.name || 'User'} sub={`${label(t.from.type)} · ${t.from.id.slice(-8)}`} size={32} to={fromLink(t.from)} />
           </div>
           <div>
             <div className="a-small a-muted" style={{ marginBottom: 6 }}>Priority</div>
             <Select
               value={t.priority}
-              onChange={e => update('tickets', t.id, { priority: e.target.value }, [`Set ticket priority to ${e.target.value}`, t.id])}
+              onChange={e => setPriority(e.target.value)}
               options={[
                 { value: 'low', label: 'Low' },
                 { value: 'medium', label: 'Medium' },
@@ -134,7 +152,7 @@ function TicketDetail({ t, me, onBack, update, toast }) {
             <div className="a-row wrap" style={{ gap: 8 }}>
               <b className={t.assignee ? 'a-strong' : 'a-faint'}>{t.assignee || 'Unassigned'}</b>
               {t.assignee !== myName ? (
-                <Button size="sm" variant="ghost" icon={UserCheck} onClick={() => update('tickets', t.id, { assignee: myName }, ['Assigned ticket to self', t.id])}>
+                <Button size="sm" variant="ghost" icon={UserCheck} disabled={busy} onClick={() => call('/assign', {}, 'Assigned to you')}>
                   Assign to me
                 </Button>
               ) : null}
@@ -146,10 +164,10 @@ function TicketDetail({ t, me, onBack, update, toast }) {
       <div className="sp-thread" ref={threadRef}>
         {t.messages.map((m, i) => (
           <div key={`${m.ts}-${i}`} className={`sp-msg ${m.by === 'admin' ? 'admin' : ''}`}>
-            <Avatar src={m.by === 'admin' ? null : t.from.avatar} name={m.name} size={28} />
+            <Avatar src={m.by === 'admin' ? null : t.from.avatar} name={m.name || t.from.name} size={28} />
             <div style={{ minWidth: 0 }}>
               <div className="sp-meta">
-                <b>{m.name}</b>
+                <b>{m.name || (m.by === 'admin' ? 'Support' : t.from.name)}</b>
                 {m.by === 'admin' ? ' · Support' : ''} · {dateTime(m.ts)}
               </div>
               <div className="sp-bubble">{m.text}</div>
@@ -175,7 +193,7 @@ function TicketDetail({ t, me, onBack, update, toast }) {
         <Textarea
           value={text}
           onChange={e => setText(e.target.value)}
-          placeholder={`Reply to ${t.from.name}… (Ctrl + Enter to send)`}
+          placeholder={`Reply to ${t.from.name || 'them'}… (Ctrl + Enter to send)`}
           onKeyDown={e => {
             if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send()
           }}
@@ -183,7 +201,7 @@ function TicketDetail({ t, me, onBack, update, toast }) {
         />
         <div className="a-row between">
           <span className="a-small a-muted">Sent as {myName}. The ticket moves to Pending.</span>
-          <Button variant="primary" icon={Send} disabled={!text.trim()} onClick={send}>
+          <Button variant="primary" icon={Send} disabled={!text.trim() || busy} onClick={send}>
             Send reply
           </Button>
         </div>
@@ -193,7 +211,7 @@ function TicketDetail({ t, me, onBack, update, toast }) {
 }
 
 export default function SupportPage() {
-  const { db, me, update } = useStore()
+  const { me, refreshCounts } = useStore()
   const toast = useToast()
   const [tab, setTab] = useState('open')
   const [category, setCategory] = useState('all')
@@ -201,32 +219,39 @@ export default function SupportPage() {
   const [q, setQ] = useState('')
   const [selId, setSelId] = useState(null)
 
-  const categories = useMemo(() => Array.from(new Set(db.tickets.map(t => t.category))).sort(), [db.tickets])
-
-  const filtered = useMemo(() => {
-    const s = q.trim().toLowerCase()
-    return db.tickets.filter(
-      t =>
-        (category === 'all' || t.category === category) &&
-        (priority === 'all' || t.priority === priority) &&
-        (!s || [t.id, t.subject, t.from.name, t.from.id, ...t.messages.map(m => m.text)].some(v => String(v).toLowerCase().includes(s))),
-    )
-  }, [db.tickets, category, priority, q])
-
-  const counts = {
-    open: filtered.filter(t => t.status === 'open').length,
-    pending: filtered.filter(t => t.status === 'pending').length,
-    closed: filtered.filter(t => t.status === 'closed').length,
+  const filters = { category: category === 'all' ? undefined : category, priority: priority === 'all' ? undefined : priority, q: q.trim() || undefined }
+  const res = useApi('/admin/support', { ...filters, status: tab, limit: LIST_LIMIT })
+  // Unfiltered totals for the header.
+  const allRes = useApi('/admin/support', { limit: 1 })
+  const unassigned = useApi('/admin/support', { status: 'open', assignee: 'none', limit: 1 })
+  const selRes = useApi(selId ? `/admin/support/${selId}` : null)
+  const reloadAll = () => {
+    res.reload()
+    allRes.reload()
+    unassigned.reload()
+    if (selId) selRes.reload()
   }
-  const list = useMemo(() => filtered.filter(t => t.status === tab).sort((a, b) => b.updated - a.updated), [filtered, tab])
-  const selected = selId ? db.tickets.find(t => t.id === selId) : null
+  useAdminEvent(SUPPORT_EVENTS, reloadAll)
+
+  const categories = allRes.data?.categories?.slice().sort() || []
+  const counts = res.data?.counts || {}
+  const totals = allRes.data?.counts || {}
+  const list = res.data?.items || []
+  const selected = selId ? (selRes.data?.ticket?.id === selId ? selRes.data.ticket : list.find(t => t.id === selId)) || null : null
+
+  const onSaved = t => {
+    res.setData(d => (d ? { ...d, items: d.items.map(x => (x.id === t.id ? t : x)) } : d))
+    selRes.setData(d => (d ? { ...d, ticket: t } : d))
+    reloadAll()
+    refreshCounts()
+  }
 
   return (
     <>
       <style>{CSS}</style>
       <PageHeader
         title="Support"
-        subtitle={`${num(db.tickets.filter(t => t.status === 'open').length)} open · ${num(db.tickets.filter(t => t.status === 'open' && !t.assignee).length)} unassigned · ${num(db.tickets.filter(t => t.status === 'pending').length)} waiting on the customer`}
+        subtitle={`${num(totals.open)} open · ${num(unassigned.data?.total)} unassigned · ${num(totals.pending)} waiting on the customer`}
       />
 
       <div className={`sp-wrap ${selected ? 'has-sel' : ''}`}>
@@ -259,17 +284,21 @@ export default function SupportPage() {
             </div>
           </div>
           <div className="sp-scroll">
-            {list.length ? (
+            {res.error && !res.data ? (
+              <ErrorState error={res.error} onRetry={res.reload} />
+            ) : !res.data ? (
+              <Loading />
+            ) : list.length ? (
               list.map(t => {
                 const unread = t.status === 'open'
-                const last = t.messages[t.messages.length - 1]
+                const last = t.messages[t.messages.length - 1] || { by: 'user', text: '' }
                 return (
                   <button key={t.id} type="button" className={`sp-item ${t.id === selId ? 'on' : ''}`} onClick={() => setSelId(t.id)}>
                     {unread ? <span className="sp-dot" aria-label="Needs reply" /> : <span style={{ width: 8, flexShrink: 0 }} />}
-                    <Avatar src={t.from.avatar} name={t.from.name} size={36} />
+                    <Avatar src={t.from.avatar} name={t.from.name || 'User'} size={36} />
                     <span style={{ flex: 1, minWidth: 0 }}>
                       <span className="a-row between" style={{ gap: 8 }}>
-                        <span style={{ fontWeight: unread ? 800 : 600, color: 'var(--ink)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.from.name}</span>
+                        <span style={{ fontWeight: unread ? 800 : 600, color: 'var(--ink)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.from.name || 'User'}</span>
                         <span className="a-small a-muted a-nowrap">{ago(t.updated)}</span>
                       </span>
                       <span style={{ display: 'block', fontWeight: unread ? 700 : 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.subject}</span>
@@ -289,11 +318,16 @@ export default function SupportPage() {
             ) : (
               <Empty icon={Inbox} title="No tickets" text={tab === 'open' ? 'Inbox zero. Nice.' : 'Nothing matches these filters.'} />
             )}
+            {res.data && res.data.total > list.length ? (
+              <div className="a-small a-muted" style={{ padding: 12, textAlign: 'center' }}>
+                Showing the {list.length} most recent of {num(res.data.total)}. Search to find older tickets.
+              </div>
+            ) : null}
           </div>
         </Card>
 
         {selected ? (
-          <TicketDetail key={selected.id} t={selected} me={me} update={update} toast={toast} onBack={() => setSelId(null)} />
+          <TicketDetail key={selected.id} t={selected} me={me} onSaved={onSaved} toast={toast} onBack={() => setSelId(null)} />
         ) : (
           <Card className="sp-detail">
             <Empty icon={LifeBuoy} title="Select a ticket" text="Pick a conversation on the left to read and reply." />

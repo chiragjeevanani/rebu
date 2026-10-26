@@ -23,6 +23,7 @@ import Button from '../../components/Button';
 import IconButton from '../../components/IconButton';
 import { CoinIcon } from '../../components/CoinPill';
 import { useSecureScreen } from '../../utils/secure';
+import { post } from '../../api/client';
 import { inr } from '../../data/economy';
 
 export default function CallEndedScreen({ navigation, route }) {
@@ -40,10 +41,17 @@ export default function CallEndedScreen({ navigation, route }) {
   const insets = useSafeAreaInsets();
   const [rating, setRating] = useState(0);
   const [blocked, setBlocked] = useState(!!blockedOnCall);
+  // Callers rate the host once; the server keeps the host's running average.
+  const rate = n => {
+    if (!rating && route.params.callId && !incoming) {
+      post(`/calls/${route.params.callId}/rate`, { stars: n }).catch(() => {});
+    }
+    setRating(n);
+  };
   const info = callStatus(status);
   const connected = !!duration;
   const photo = user.photo || user.photos?.[0];
-  const chat = { name: user.name, photo, online: true };
+  const chat = { userId: user.id, name: user.name, photo, online: true };
 
   return (
     <LinearGradient
@@ -97,7 +105,7 @@ export default function CallEndedScreen({ navigation, route }) {
             <Txt style={styles.rateTitle}>How was your call?</Txt>
             <View style={styles.stars}>
               {[1, 2, 3, 4, 5].map(n => (
-                <Pressable key={n} onPress={() => setRating(n)} hitSlop={4}>
+                <Pressable key={n} onPress={() => rate(n)} hitSlop={4}>
                   <Star
                     size={34}
                     color={colors.warning}
@@ -112,7 +120,13 @@ export default function CallEndedScreen({ navigation, route }) {
         <View style={styles.safety}>
           <Pressable
             style={styles.safetyBtn}
-            onPress={() => navigation.navigate('Report', { name: user.name })}
+            onPress={() =>
+              navigation.navigate('Report', {
+                name: user.name,
+                targetType: incoming ? 'user' : 'host',
+                targetId: user.id,
+              })
+            }
           >
             <Flag size={14} color="rgba(255,255,255,0.75)" />
             <Txt style={styles.safetyText}>Report</Txt>
@@ -120,7 +134,10 @@ export default function CallEndedScreen({ navigation, route }) {
           <Pressable
             style={styles.safetyBtn}
             disabled={blocked}
-            onPress={() => setBlocked(true)}
+            onPress={() => {
+              setBlocked(true);
+              if (user.id) post(`/me/blocked/${user.id}`).catch(() => {});
+            }}
           >
             <Ban size={14} color="rgba(255,255,255,0.75)" />
             <Txt style={styles.safetyText}>{blocked ? 'Blocked' : 'Block'}</Txt>

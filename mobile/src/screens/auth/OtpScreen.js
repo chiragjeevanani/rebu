@@ -6,30 +6,50 @@ import Header from '../../components/Header';
 import Txt from '../../components/Txt';
 import Button from '../../components/Button';
 import { useApp } from '../../context/AppContext';
-import { DEMO_ACCOUNT, MOCK_OTP } from '../../data/mock';
+import { post } from '../../api/client';
 
 const LEN = 6;
 
 export default function OtpScreen({ navigation, route }) {
   const phone = route.params?.phone || '';
+  const [devCode, setDevCode] = useState(route.params?.devCode);
+  const [busy, setBusy] = useState(false);
   const [code, setCode] = useState('');
   const [timer, setTimer] = useState(30);
   const [error, setError] = useState('');
   const inputRef = useRef(null);
-  const { signIn, completeProfile } = useApp();
+  const { startSession } = useApp();
 
-  const verify = value => {
-    if (value !== MOCK_OTP) {
-      setError(`Incorrect code. For testing use ${MOCK_OTP}.`);
-      return;
+  const verify = async value => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const { token, user } = await post('/auth/otp/verify', {
+        phone,
+        code: value,
+      });
+      Keyboard.dismiss();
+      if (user.profileDone) {
+        await startSession(token, user);
+      } else {
+        // New account: finish the profile first, then enter the app.
+        navigation.navigate('ProfileSetup', { token, user });
+      }
+    } catch (e) {
+      setError(e.message);
+      setCode('');
+    } finally {
+      setBusy(false);
     }
-    Keyboard.dismiss();
-    if (phone === DEMO_ACCOUNT.phone) {
-      // Existing account: skip onboarding and land in the app.
-      completeProfile();
-      signIn();
-    } else {
-      navigation.navigate('ProfileSetup');
+  };
+
+  const resend = async () => {
+    setTimer(route.params?.resendAfter || 30);
+    try {
+      const r = await post('/auth/otp/send', { phone });
+      setDevCode(r.devCode);
+    } catch (e) {
+      setError(e.message);
     }
   };
 
@@ -113,7 +133,13 @@ export default function OtpScreen({ navigation, route }) {
           </Txt>
         ) : (
           <Txt variant="small" center style={styles.error}>
-            Test code: <Txt variant="label">{MOCK_OTP}</Txt>
+            {devCode ? (
+              <>
+                Test code: <Txt variant="label">{devCode}</Txt>
+              </>
+            ) : (
+              'Enter the 6-digit code we sent you.'
+            )}
           </Txt>
         )}
 
@@ -126,11 +152,7 @@ export default function OtpScreen({ navigation, route }) {
               </Txt>
             </Txt>
           ) : (
-            <Txt
-              variant="label"
-              color={colors.primary}
-              onPress={() => setTimer(30)}
-            >
+            <Txt variant="label" color={colors.primary} onPress={resend}>
               Resend code
             </Txt>
           )}
@@ -140,6 +162,7 @@ export default function OtpScreen({ navigation, route }) {
         <Button
           title="Verify & Continue"
           disabled={code.length < LEN}
+          loading={busy}
           onPress={() => verify(code)}
         />
       </View>

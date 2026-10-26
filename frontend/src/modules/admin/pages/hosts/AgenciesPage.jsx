@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
-import { Building2, Download, IndianRupee, Pencil, Plus, RotateCcw, ShieldOff, Users } from 'lucide-react'
-import { useStore } from '../../hooks/useStore'
+import { useEffect, useMemo, useState } from 'react'
+import { Building2, Download, IndianRupee, Pencil, Plus, RotateCcw, ShieldOff, Trash2, Users } from 'lucide-react'
 import { useToast } from '../../hooks/useToast'
+import { serverTable, useApi, usePaging } from '../../hooks/useApi'
+import { api, errorText } from '../../api/client'
 import {
   Badge,
   Button,
@@ -10,8 +11,10 @@ import {
   DataTable,
   Drawer,
   Empty,
+  ErrorState,
   Field,
   Input,
+  Loading,
   Modal,
   PageHeader,
   SearchInput,
@@ -33,7 +36,16 @@ const prefixOf = name =>
 
 const randomDigits = () => String(1000 + Math.floor(Math.random() * 9000))
 
-function AgencyForm({ open, agency, digits, codes, onClose, onSave }) {
+function useDebounced(value, delay = 300) {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), delay)
+    return () => clearTimeout(t)
+  }, [value, delay])
+  return v
+}
+
+function AgencyForm({ open, agency, digits, codes, busy, onClose, onSave }) {
   const [f, setF] = useState(() => ({
     name: agency?.name || '',
     code: agency?.code || '',
@@ -90,7 +102,7 @@ function AgencyForm({ open, agency, digits, codes, onClose, onSave }) {
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={submit} disabled={touched && !valid}>
+          <Button variant="primary" onClick={submit} disabled={busy || (touched && !valid)}>
             {agency ? 'Save changes' : 'Create agency'}
           </Button>
         </>
@@ -138,68 +150,75 @@ function AgencyForm({ open, agency, digits, codes, onClose, onSave }) {
 }
 
 export default function AgenciesPage() {
-  const { db, update, create, log } = useStore()
   const toast = useToast()
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('all')
   const [form, setForm] = useState(null) // { agency|null, digits }
   const [confirm, setConfirm] = useState(null) // agency
+  const [deleting, setDeleting] = useState(null) // agency
   const [openId, setOpenId] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const term = useDebounced(q.trim())
 
-  const hostsBy = useMemo(() => {
-    const m = {}
-    for (const h of db.hosts) if (h.agencyId) (m[h.agencyId] ||= []).push(h)
-    return m
-  }, [db.hosts])
+  const pg = usePaging({ q: term || undefined, status: status === 'all' ? undefined : status }, 20)
+  const res = useApi('/admin/agencies', pg.query)
+  const rows = res.data?.items
 
-  const rows = useMemo(() => {
-    const t = q.trim().toLowerCase()
-    return db.agencies.filter(
-      a =>
-        (status === 'all' || a.status === status) &&
-        (!t || [a.name, a.code, a.owner, a.city, a.phone, a.email].some(v => String(v || '').toLowerCase().includes(t))),
-    )
-  }, [db.agencies, q, status])
+  // Every agency (there are few) for the header totals and code uniqueness.
+  const allRes = useApi('/admin/agencies', { limit: 100 })
+  const all = useMemo(() => allRes.data?.items || [], [allRes.data])
+  const hostsTotal = useApi('/admin/hosts', { limit: 1 })
+  const detail = useApi(openId ? `/admin/agencies/${openId}` : null)
 
   const totals = useMemo(
     () => ({
-      active: db.agencies.filter(a => a.status === 'active').length,
-      hosts: db.hosts.filter(h => h.agencyId).length,
-      month: db.agencies.reduce((n, a) => n + (a.monthEarnings || 0), 0),
+      count: allRes.data?.total ?? all.length,
+      active: all.filter(a => a.status === 'active').length,
+      hosts: all.reduce((n, a) => n + (a.hosts || 0), 0),
+      month: all.reduce((n, a) => n + (a.monthEarnings || 0), 0),
     }),
-    [db.agencies, db.hosts],
+    [all, allRes.data],
   )
 
-  const open = db.agencies.find(a => a.id === openId) || null
-  const openHosts = open ? hostsBy[open.id] || [] : []
+  const open = openId ? detail.data?.agency || (rows || []).find(a => a.id === openId) || null : null
+  const openHosts = detail.data?.hosts || []
 
-  const save = data => {
-    if (form.agency) {
-      update('agencies', form.agency.id, data, [`Updated agency ${data.name} (${data.code})`, form.agency.id])
-      toast('Agency saved')
-    } else {
-      const nums = db.agencies.map(a => Number(String(a.id).replace(/^AG/, ''))).filter(Number.isFinite)
-      const id = `AG${Math.max(0, ...nums) + 1}`
-      create('agencies', { id, ...data, status: 'active', created: Date.now(), monthEarnings: 0 })
-      log(`Created agency ${data.name} (${data.code})`, id)
-      toast(`${data.name} created`)
+  const reloadAll = () => {
+    res.reload()
+    allRes.reload()
+    if (openId) detail.reload()
+  }
+
+  const run = async (fn, ok) => {
+    setBusy(true)
+    try {
+      await fn()
+      toast(ok)
+      reloadAll()
+      setBusy(false)
+      return true
+    } catch (e) {
+      toast(errorText(e), 'error')
+      setBusy(false)
+      return false
     }
-    setForm(null)
   }
 
-  const setAgencyStatus = (a, next, reason) => {
-    update('agencies', a.id, { status: next, statusReason: reason || '' }, [
-      `${next === 'active' ? 'Activated' : 'Suspended'} agency ${a.name}${reason ? ` — ${reason}` : ''}`,
-      a.id,
-    ])
-    toast(`${a.name} ${next === 'active' ? 'activated' : 'suspended'}`)
+  const save = async data => {
+    const ok = form.agency
+      ? await run(() => api.patch(`/admin/agencies/${form.agency.id}`, data), 'Agency saved')
+      : await run(() => api.post('/admin/agencies', data), `${data.name} created`)
+    if (ok) setForm(null)
   }
+
+  const setAgencyStatus = (a, next, reason) =>
+    run(() => api.post(`/admin/agencies/${a.id}/status`, { status: next, reason: reason || undefined }), `${a.name} ${next === 'active' ? 'activated' : 'suspended'}`)
 
   const columns = [
     {
       key: 'name',
       label: 'Agency',
-      sort: a => a.name,
+      serverSort: 'name',
       render: a => (
         <div>
           <b className="a-strong">{a.name}</b>
@@ -212,10 +231,9 @@ export default function AgenciesPage() {
     {
       key: 'owner',
       label: 'Owner',
-      sort: a => a.owner,
       render: a => (
         <div>
-          <span style={{ fontWeight: 600 }}>{a.owner}</span>
+          <span style={{ fontWeight: 600 }}>{a.owner || '—'}</span>
           <span className="a-small a-muted a-nowrap" style={{ display: 'block' }}>
             {a.phone}
             {a.email ? ` · ${a.email}` : ''}
@@ -223,12 +241,12 @@ export default function AgenciesPage() {
         </div>
       ),
     },
-    { key: 'city', label: 'City', sort: a => a.city },
-    { key: 'hosts', label: 'Hosts', align: 'right', sort: a => (hostsBy[a.id] || []).length, render: a => num((hostsBy[a.id] || []).length) },
-    { key: 'cut', label: 'Cut', align: 'right', sort: a => a.cut, render: a => `${a.cut}%` },
-    { key: 'monthEarnings', label: 'This month', align: 'right', sort: a => a.monthEarnings, render: a => <b className="a-strong">{inr(a.monthEarnings)}</b> },
-    { key: 'status', label: 'Status', sort: a => a.status, render: a => <Status value={a.status} /> },
-    { key: 'created', label: 'Created', sort: a => a.created, render: a => <span className="a-nowrap">{date(a.created)}</span> },
+    { key: 'city', label: 'City', render: a => a.city || '—' },
+    { key: 'hosts', label: 'Hosts', align: 'right', render: a => num(a.hosts) },
+    { key: 'cut', label: 'Cut', align: 'right', serverSort: 'cut', render: a => `${a.cut}%` },
+    { key: 'monthEarnings', label: 'This month', align: 'right', render: a => <b className="a-strong">{inr(a.monthEarnings)}</b> },
+    { key: 'status', label: 'Status', render: a => <Status value={a.status} /> },
+    { key: 'created', label: 'Created', serverSort: 'created', render: a => <span className="a-nowrap">{date(a.created)}</span> },
     {
       key: 'actions',
       label: '',
@@ -246,7 +264,7 @@ export default function AgenciesPage() {
     },
   ]
 
-  const codesExcept = id => db.agencies.filter(a => a.id !== id).map(a => a.code.toUpperCase())
+  const codesExcept = id => all.filter(a => a.id !== id).map(a => a.code.toUpperCase())
 
   return (
     <>
@@ -258,7 +276,7 @@ export default function AgenciesPage() {
             <Button
               icon={Download}
               onClick={() =>
-                exportCsv('rebu-agencies.csv', rows, [
+                exportCsv('rebu-agencies.csv', all, [
                   { label: 'ID', value: a => a.id },
                   { label: 'Name', value: a => a.name },
                   { label: 'Code', value: a => a.code },
@@ -266,7 +284,7 @@ export default function AgenciesPage() {
                   { label: 'Phone', value: a => a.phone },
                   { label: 'Email', value: a => a.email },
                   { label: 'City', value: a => a.city },
-                  { label: 'Hosts', value: a => (hostsBy[a.id] || []).length },
+                  { label: 'Hosts', value: a => a.hosts },
                   { label: 'Cut (%)', value: a => a.cut },
                   { label: 'Month earnings (INR)', value: a => a.monthEarnings },
                   { label: 'Status', value: a => a.status },
@@ -284,8 +302,8 @@ export default function AgenciesPage() {
       />
 
       <div className="a-grid c3" style={{ marginBottom: 20 }}>
-        <Stat label="Agencies" value={num(db.agencies.length)} icon={Building2} sub={`${totals.active} active`} />
-        <Stat label="Hosts in agencies" value={num(totals.hosts)} icon={Users} sub={`of ${num(db.hosts.length)} hosts`} />
+        <Stat label="Agencies" value={num(totals.count)} icon={Building2} sub={`${totals.active} active`} />
+        <Stat label="Hosts in agencies" value={num(totals.hosts)} icon={Users} sub={hostsTotal.data ? `of ${num(hostsTotal.data.total)} hosts` : 'approved hosts'} />
         <Stat label="Agency share this month" value={inr(totals.month)} icon={IndianRupee} sub="paid to agencies" />
       </div>
 
@@ -293,8 +311,8 @@ export default function AgenciesPage() {
         <DataTable
           rows={rows}
           columns={columns}
+          {...serverTable(pg, res)}
           onRowClick={a => setOpenId(a.id)}
-          initialSort={{ key: 'monthEarnings', dir: 'desc' }}
           toolbar={
             <>
               <SearchInput value={q} onChange={setQ} placeholder="Name, code, owner, city" />
@@ -302,7 +320,7 @@ export default function AgenciesPage() {
             </>
           }
           empty={
-            db.agencies.length ? (
+            totals.count ? (
               <Empty title="No results" text="Try a different search or filter." />
             ) : (
               <Empty icon={Building2} title="No agencies yet" text="Create one to give hosts an agency code." />
@@ -330,6 +348,11 @@ export default function AgenciesPage() {
                   Activate
                 </Button>
               )}
+              {!open.hosts ? (
+                <Button variant="ghost" icon={Trash2} onClick={() => setDeleting(open)}>
+                  Delete
+                </Button>
+              ) : null}
             </>
           ) : null
         }
@@ -342,16 +365,15 @@ export default function AgenciesPage() {
               <dt>Status</dt>
               <dd>
                 <Status value={open.status} />
-                {open.status !== 'active' && open.statusReason ? <span className="a-small a-muted" style={{ display: 'block' }}>{open.statusReason}</span> : null}
               </dd>
               <dt>Owner</dt>
-              <dd>{open.owner}</dd>
+              <dd>{open.owner || '—'}</dd>
               <dt>Phone</dt>
-              <dd>{open.phone}</dd>
+              <dd>{open.phone || '—'}</dd>
               <dt>Email</dt>
               <dd>{open.email || '—'}</dd>
               <dt>City</dt>
-              <dd>{open.city}</dd>
+              <dd>{open.city || '—'}</dd>
               <dt>Cut</dt>
               <dd>{open.cut}%</dd>
               <dt>This month</dt>
@@ -364,16 +386,18 @@ export default function AgenciesPage() {
               <b className="a-strong">Hosts</b>
               <Badge>{openHosts.length}</Badge>
             </div>
-            {openHosts.length ? (
+            {detail.error ? (
+              <ErrorState error={detail.error} onRetry={detail.reload} />
+            ) : !detail.data ? (
+              <Loading />
+            ) : openHosts.length ? (
               <div className="a-stack" style={{ gap: 12 }}>
-                {[...openHosts]
-                  .sort((a, b) => b.lifetime - a.lifetime)
-                  .map(h => (
-                    <div key={h.id} className="a-row between">
-                      <Who src={h.avatar} name={h.name} sub={`${h.id} · Lv ${h.level} · ${inr(h.lifetime)} earned`} to={`/admin/hosts/${h.id}`} />
-                      <Status value={h.status === 'active' ? (h.online ? 'online' : 'offline') : h.status} />
-                    </div>
-                  ))}
+                {openHosts.map(h => (
+                  <div key={h.id} className="a-row between">
+                    <Who src={h.avatar} name={h.name} sub={`${h.id} · Lv ${h.level}`} to={`/admin/hosts/${h.id}`} />
+                    <Status value={h.status === 'active' ? (h.online ? 'online' : 'offline') : h.status} />
+                  </div>
+                ))}
               </div>
             ) : (
               <Empty icon={Users} title="No hosts yet" text={`Hosts join by entering code ${open.code} when they apply.`} />
@@ -388,6 +412,7 @@ export default function AgenciesPage() {
           agency={form.agency}
           digits={form.digits || '0000'}
           codes={codesExcept(form.agency?.id)}
+          busy={busy}
           onClose={() => setForm(null)}
           onSave={save}
         />
@@ -401,9 +426,8 @@ export default function AgenciesPage() {
         danger
         reason
         onClose={() => setConfirm(null)}
-        onConfirm={reason => {
-          setAgencyStatus(confirm, 'suspended', reason)
-          setConfirm(null)
+        onConfirm={async reason => {
+          if (await setAgencyStatus(confirm, 'suspended', reason)) setConfirm(null)
         }}
       />
       <Confirm
@@ -412,9 +436,23 @@ export default function AgenciesPage() {
         message="The agency code works again for new applicants and the agency share resumes."
         confirmLabel="Activate"
         onClose={() => setConfirm(null)}
-        onConfirm={() => {
-          setAgencyStatus(confirm, 'active')
-          setConfirm(null)
+        onConfirm={async () => {
+          if (await setAgencyStatus(confirm, 'active')) setConfirm(null)
+        }}
+      />
+      <Confirm
+        open={!!deleting}
+        title={`Delete ${deleting?.name}?`}
+        message="The agency and its code are removed for good. Only agencies with no hosts can be deleted."
+        confirmLabel="Delete agency"
+        danger
+        onClose={() => setDeleting(null)}
+        onConfirm={async () => {
+          const a = deleting
+          if (await run(() => api.del(`/admin/agencies/${a.id}`), `${a.name} deleted`)) {
+            setDeleting(null)
+            setOpenId(null)
+          }
         }}
       />
     </>
