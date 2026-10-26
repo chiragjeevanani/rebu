@@ -1,0 +1,12 @@
+# Release binaries and client documents stay out of the (public) repo
+builds/
+*.apk
+*.aab
+reference/
+dating app scope.pdf
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

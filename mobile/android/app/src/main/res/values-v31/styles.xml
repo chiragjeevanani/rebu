@@ -1,0 +1,10 @@
+<resources>
+
+    <!-- Android 12+ shows a system splash first; match it to the REBU badge. -->
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
+        <item name="android:windowBackground">@drawable/launch_screen</item>
+        <item name="android:windowSplashScreenBackground">@color/rebu_purple</item>
+    </style>
+
+</resources>

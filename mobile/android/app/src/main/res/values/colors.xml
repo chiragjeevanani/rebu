@@ -1,0 +1,4 @@
+<resources>
+    <!-- Background of the REBU logo badge. -->
+    <color name="rebu_purple">#560D8E</color>
+</resources>
