@@ -27,3 +27,7 @@ Demo sign-ins (test build only — remove before launch):
 - `routes/nav.js` — sidebar, roles and which sections each role can open.
 - `components/ui.jsx`, `components/charts.jsx`, `styles/admin.css` — the shared UI kit.
 - `db.config` (economy, coin packs, gifts, host levels, VIP, app settings) is what the mobile app will fetch on launch.
+
+## Deploy (Vercel)
+
+Import the repo in Vercel and set **Root Directory = `frontend`**. `vercel.json` sets the Vite build and rewrites every route to `index.html`, so deep links and refreshes (e.g. `/admin/users/U10001`) don't 404.
