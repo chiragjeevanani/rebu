@@ -263,7 +263,7 @@ function LoginTab({ d, set }) {
                 inputMode="numeric"
                 maxLength={10}
                 value={d.otp.testNumber || ''}
-                onChange={e => otp({ testNumber: e.target.value.replace(/D/g, '') })}
+                onChange={e => otp({ testNumber: e.target.value.replace(/\D/g, '') })}
                 placeholder="9876543210"
               />
             </Field>
@@ -273,20 +273,37 @@ function LoginTab({ d, set }) {
                 inputMode="numeric"
                 maxLength={8}
                 value={d.otp.testOtp || ''}
-                onChange={e => otp({ testOtp: e.target.value.replace(/D/g, '') })}
+                onChange={e => otp({ testOtp: e.target.value.replace(/\D/g, '') })}
               />
             </Field>
           </div>
+        </div>
+      </Card>
+      <Card title="Default OTP for new sign-ups" subtitle="For client testing. New numbers can sign up with this code, no SMS. Accounts made this way keep using it. Existing accounts still get real SMS codes.">
+        <div className="a-stack">
+          {d.otp.fixedCode ? <Warn>Anyone can create an account with this code. Clear it before going live.</Warn> : null}
+          <Field label="Default OTP" hint="4–8 digits. Leave empty to turn off" error={fixedCodeError(d.otp)}>
+            <Input
+              className="a-mono"
+              inputMode="numeric"
+              maxLength={8}
+              value={d.otp.fixedCode || ''}
+              onChange={e => otp({ fixedCode: e.target.value.replace(/\D/g, '') })}
+              placeholder="123456"
+            />
+          </Field>
         </div>
       </Card>
     </div>
   )
 }
 
+const fixedCodeError = o => (o.fixedCode && !/^\d{4,8}$/.test(o.fixedCode) ? '4–8 digits' : null)
+
 // Mirrors the server: '' or a 10-digit Indian mobile (6–9 first), and '' or 4–8 digits.
-const testNumberError = o => (o.testNumber && !/^[6-9]d{9}$/.test(o.testNumber) ? '10 digits, starting 6–9' : null)
+const testNumberError = o => (o.testNumber && !/^[6-9]\d{9}$/.test(o.testNumber) ? '10 digits, starting 6–9' : null)
 const testOtpError = o => {
-  if (o.testOtp && !/^d{4,8}$/.test(o.testOtp)) return '4–8 digits'
+  if (o.testOtp && !/^\d{4,8}$/.test(o.testOtp)) return '4–8 digits'
   if (o.testNumber && !o.testOtp) return 'Set an OTP for the test number'
   return null
 }

@@ -344,6 +344,32 @@ r = await api(null, 'POST', '/auth/otp/verify', { phone: '9876500001', code: '42
 ok(!!r.token, 'reviewer signs in with the fixed code', r.error)
 await adminApi('PUT', '/config/settings', settings)
 
+console.log('default OTP for new sign-ups')
+const NEWP = '9876500077'
+const signIn = async (phone, code) => {
+  await api(null, 'POST', '/auth/otp/send', { phone })
+  return api(null, 'POST', '/auth/otp/verify', { phone, code })
+}
+r = await adminApi('PUT', '/config/settings', { ...settings, otp: { ...settings.otp, fixedCode: '123456' } })
+ok(r.value?.otp?.fixedCode === '123456', 'admin sets a default OTP', r.error)
+r = await api(null, 'GET', '/config')
+ok(r.settings?.otp && !('fixedCode' in r.settings.otp), 'the default code never reaches apps', r.settings?.otp)
+r = await signIn(NEWP, '123456')
+ok(!!r.token && r.isNew === true, 'a brand-new number signs up with 123456', r.error)
+ok(!('fixedOtp' in (r.user || {})), 'the flag is not sent to the app')
+r = await signIn(NEWP, '123456')
+ok(!!r.token && r.isNew === false, 'that account logs in again with 123456')
+const existingPhone = (await api('u2', 'GET', '/me')).user.phone
+r = await signIn(existingPhone, '123456')
+ok(!r.token, 'an account that already existed is NOT opened by 123456', r)
+r = await adminApi('PUT', '/config/settings', { ...settings, otp: { ...settings.otp, fixedCode: '12' } })
+ok(r.error || r.status === 400 || !r.value, 'a bad default code is refused', r)
+await adminApi('PUT', '/config/settings', settings)
+r = await signIn(NEWP, '123456')
+ok(!r.token, 'with the setting off, 123456 no longer works for that account', r)
+r = await signIn('9876500078', '123456')
+ok(!r.token, 'with the setting off, new numbers need a real code', r)
+
 // ---------------------------------------------------------------- admin stats
 console.log('admin stats')
 r = await adminApi('GET', '/hosts/stats')

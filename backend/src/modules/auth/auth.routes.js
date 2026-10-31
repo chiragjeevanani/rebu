@@ -69,7 +69,13 @@ authRoutes.post(
     const { phone } = parse(z.object({ phone: phoneSchema }), req.body)
     const { otp } = getConfig().settings
     // Fixed codes, no SMS: the dev demo number, and the app-store reviewer number set in the admin panel.
-    const fixed = phone === env.demoPhone && env.demoOtp ? env.demoOtp : otp.testNumber && phone === otp.testNumber && otp.testOtp ? otp.testOtp : null
+    let fixed = phone === env.demoPhone && env.demoOtp ? env.demoOtp : otp.testNumber && phone === otp.testNumber && otp.testOtp ? otp.testOtp : null
+    // Test mode: while an admin has set a default code, new numbers sign up with it, and so do the accounts made that way.
+    // Accounts that already existed keep getting real SMS codes.
+    if (!fixed && otp.fixedCode) {
+      const u = await User.findOne({ phone }, { fixedOtp: 1 }).lean()
+      if (!u || u.fixedOtp) fixed = otp.fixedCode
+    }
     const isDemo = !!fixed
     const code = fixed || String(crypto.randomInt(10 ** (otp.length - 1), 10 ** otp.length))
     await Otp.deleteMany({ phone })
@@ -104,7 +110,7 @@ authRoutes.post(
     let user = await User.findOne({ phone })
     let isNew = false
     if (!user) {
-      user = await User.create({ phone })
+      user = await User.create({ phone, fixedOtp: !!getConfig().settings.otp.fixedCode })
       isNew = true
       const gift = getConfig().economy.newUserCoins
       if (gift > 0) await creditCoins(user._id, gift, { type: 'signup_bonus', title: 'Welcome gift' })

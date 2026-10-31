@@ -19,6 +19,7 @@ import Txt from '../../components/Txt';
 import { RoomCard } from '../rooms/RoomsScreen';
 import {
   CallFab,
+  HostCircles,
   LiveCard,
   QuickActions,
   Section,
@@ -83,12 +84,29 @@ function Grid({ hosts, header, empty, navigation }) {
 /* ---------- For You ---------- */
 export function ForYouScreen({ navigation }) {
   const hosts = useHosts();
+  const open = h => openHost(navigation, h);
   return (
     <Screen>
       <TopBar />
       <Grid
         hosts={byOnline(hosts)}
-        header={<QuickActions />}
+        header={
+          <>
+            <QuickActions />
+            <HostCircles
+              title="Online"
+              online
+              hosts={hosts.filter(h => h.online)}
+              empty="No one is online right now."
+              onPress={open}
+            />
+            <HostCircles
+              title="Offline"
+              hosts={hosts.filter(h => !h.online)}
+              onPress={open}
+            />
+          </>
+        }
         navigation={navigation}
       />
       <CallFab />

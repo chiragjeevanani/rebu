@@ -196,7 +196,70 @@ export function Section({ title, onMore, children }) {
   );
 }
 
+/** Row of round host photos, like the online circles in Chats. Online hosts get a green-tagged ring; offline ones a grey ring. */
+export function HostCircles({ title, hosts, online, empty, onPress }) {
+  if (!hosts.length && !empty) return null;
+  return (
+    <View style={styles.circles}>
+      <Txt style={styles.circlesTitle}>
+        {title}
+        {hosts.length ? ` · ${hosts.length}` : ''}
+      </Txt>
+      {hosts.length ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.circlesRow}
+        >
+          {hosts.map(h => (
+            <Pressable key={h.id} style={styles.circle} onPress={() => onPress(h)}>
+              <View style={[styles.circleRing, online && styles.circleRingOn]}>
+                <Image
+                  source={{ uri: h.photo }}
+                  style={[styles.circleImg, !online && styles.circleImgOff]}
+                />
+              </View>
+              <Txt style={styles.circleName} numberOfLines={1}>
+                {h.name} {h.emoji || ''}
+              </Txt>
+            </Pressable>
+          ))}
+        </ScrollView>
+      ) : (
+        <Txt variant="small" color={colors.textMuted} style={styles.circlesEmpty}>
+          {empty}
+        </Txt>
+      )}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
+  circles: { paddingTop: 14 },
+  circlesTitle: {
+    fontFamily: fonts.bold,
+    fontSize: 16,
+    color: colors.ink,
+    paddingHorizontal: spacing.md,
+  },
+  circlesRow: { gap: 14, paddingHorizontal: spacing.md, paddingTop: 14 },
+  circlesEmpty: { paddingHorizontal: spacing.md, paddingTop: 8 },
+  circle: { alignItems: 'center', width: 78 },
+  circleRing: {
+    padding: 2,
+    borderRadius: 40,
+    borderWidth: 2,
+    borderColor: colors.borderStrong,
+  },
+  circleRingOn: { borderColor: colors.primary },
+  circleImg: { width: 66, height: 66, borderRadius: 33 },
+  circleImgOff: { opacity: 0.6 },
+  circleName: {
+    fontFamily: fonts.medium,
+    fontSize: 13,
+    color: colors.ink,
+    marginTop: 6,
+  },
   fab: {
     position: 'absolute',
     alignSelf: 'center',

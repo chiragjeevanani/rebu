@@ -194,6 +194,8 @@ const settings = z
         // App-store reviewer login: this number always accepts this code (no SMS).
         testNumber: z.union([z.literal(''), z.string().regex(/^[6-9]\d{9}$/, 'A 10-digit mobile number')]).optional(),
         testOtp: z.union([z.literal(''), z.string().regex(/^\d{4,8}$/, '4–8 digits')]).optional(),
+        // Test mode: new numbers sign up with this code instead of an SMS. Empty = off.
+        fixedCode: z.union([z.literal(''), z.string().regex(/^\d{4,8}$/, '4–8 digits')]).optional(),
       })
       .strict(),
     features: z.record(z.string(), z.boolean()),

@@ -45,6 +45,7 @@ const hostSchema = new Schema(
 const userSchema = new Schema(
   {
     phone: { type: String, required: true, unique: true, index: true },
+    fixedOtp: { type: Boolean, default: false },
     email: { type: String, lowercase: true, trim: true },
     name: { type: String, trim: true, default: '' },
     gender: { type: String, enum: ['Female', 'Male', 'Other', null], default: null },
@@ -89,6 +90,7 @@ userSchema.methods.toSelf = function () {
   const o = this.toObject()
   delete o.notes
   delete o.blocked
+  delete o.fixedOtp
   o.id = String(o._id)
   o.senderTier = senderTierOf(this.coinsBought)
   return o
