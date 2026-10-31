@@ -30,6 +30,8 @@ const economy = z
     welcomeBonusCoins: int0,
     messageCost: int0,
     newUserCoins: int0,
+    minLiveBalance: int0.default(0),
+    maxGiftQuantity: z.number().int().min(1).max(999).default(99),
   })
   .strict()
   .refine(e => e.maxWithdrawPerDay >= e.minWithdraw, { message: 'Max per day must be at least the minimum withdrawal', path: ['maxWithdrawPerDay'] })
@@ -56,6 +58,7 @@ const gifts = z
       name: str(40).min(1),
       emoji: str(16).default(''),
       image: str(500).optional(),
+      animation: str(500).optional(),
       coins: z.number().int().positive(),
       fullScreen: z.boolean().default(false),
       category: str(30).min(1),
@@ -67,14 +70,48 @@ const gifts = z
   .refine(unique('key'), 'Gift keys must be unique')
 
 const increasing = (list, k) => list.every((x, i) => i === 0 || x[k] > list[i - 1][k])
+const hostCategories = z
+  .array(
+    z
+      .object({
+        key: z.string().trim().regex(/^[a-z0-9_-]{1,24}$/),
+        name: str(30).min(1),
+        fromLevel: z.number().int().positive(),
+        maxRate: z.number().int().positive(),
+        commissionDiscount: pct,
+        color: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/, 'Use a #RRGGBB colour'),
+      })
+      .strict(),
+  )
+  .min(1)
+  .max(12)
+  .refine(unique('key'), 'Category keys must be unique')
+  .refine(l => l[0].fromLevel === 1, 'The first category must start at level 1')
+  .refine(l => increasing(l, 'fromLevel'), 'Categories must start at increasing levels')
+// Levels: gift-coin thresholds. Category, price cap and discount come from the category table.
 const hostLevels = z
-  .array(z.object({ level: z.number().int().positive(), minutes: int0, maxRate: z.number().int().positive(), commissionDiscount: pct }).strict())
+  .array(z.object({ level: z.number().int().positive(), giftCoins: int0 }).passthrough())
+  .min(1)
+  .max(200)
+  .refine(l => l[0].level === 1 && l[0].giftCoins === 0, 'Level 1 must start at 0 gift coins')
+  .refine(l => increasing(l, 'level'), 'Levels must be strictly increasing')
+  .refine(l => increasing(l, 'giftCoins'), 'Gift coins must be strictly increasing')
+const senderTiers = z
+  .array(
+    z
+      .object({
+        key: z.string().trim().regex(/^[a-z0-9_-]{1,24}$/),
+        name: str(30).min(1),
+        minCoins: int0,
+        color: z.union([z.literal(''), z.string().trim().regex(/^#[0-9a-fA-F]{6}$/, 'Use a #RRGGBB colour')]),
+      })
+      .strict(),
+  )
   .min(1)
   .max(20)
-  .refine(l => l[0].level === 1 && l[0].minutes === 0, 'Level 1 must start at 0 minutes')
-  .refine(l => increasing(l, 'level'), 'Levels must be strictly increasing')
-  .refine(l => increasing(l, 'minutes'), 'Minutes must be strictly increasing')
-  .refine(l => increasing(l, 'maxRate'), 'Max rate must be strictly increasing')
+  .refine(unique('key'), 'Tier keys must be unique')
+  .refine(l => l[0].minCoins === 0, 'The first tier must start at 0 coins')
+  .refine(l => increasing(l, 'minCoins'), 'Coin thresholds must be strictly increasing')
 
 const tiers = z
   .array(z.number().int().positive())
@@ -161,7 +198,7 @@ const settings = z
       .strict(),
     features: z.record(z.string(), z.boolean()),
     hostApply: z
-      .object({ minAge: z.number().int().min(18).max(99), autoApprove: z.boolean(), requireSelfie: z.boolean(), requireId: z.boolean(), idTypes: z.array(str(40).min(1)).min(1) })
+      .object({ minAge: z.number().int().min(18).max(99), womenOnly: z.boolean().default(true), liveWomenOnly: z.boolean().default(true), autoApprove: z.boolean(), requireSelfie: z.boolean(), requireId: z.boolean(), idTypes: z.array(str(40).min(1)).min(1) })
       .strict(),
     moderation: z
       .object({
@@ -177,6 +214,7 @@ const settings = z
         maxRoomSeats: z.number().int().min(1).max(50),
         ringTimeoutSecs: z.number().int().min(10).max(120),
         freeMessagesPerDay: int0,
+        maxCallsAtOnce: z.number().int().min(1).max(4).default(2),
       })
       .strict(),
     support: z.object({ email: z.union([z.literal(''), z.string().email()]), whatsapp: str(20), hours: str(60) }).strict(),
@@ -184,7 +222,7 @@ const settings = z
   .strict()
   .refine(s => s.otp.resendSecs < s.otp.expirySecs, { message: 'Resend wait must be shorter than expiry', path: ['otp', 'resendSecs'] })
 
-const SCHEMAS = { economy, coinPacks, gifts, hostLevels, rateTiers, vipTiers, royalClub, storeItems, tasks, families, diamondsPerCoin, settings }
+const SCHEMAS = { economy, coinPacks, gifts, hostCategories, hostLevels, senderTiers, rateTiers, vipTiers, royalClub, storeItems, tasks, families, diamondsPerCoin, settings }
 const SECTION = { settings: 'settings' } // everything else is monetization
 const sectionOf = key => SECTION[key] || 'monetization'
 

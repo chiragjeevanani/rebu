@@ -1,3 +1,10 @@
+import { loadEnvFile } from 'node:process'
+import path from 'node:path'
+
+try {
+  loadEnvFile(path.resolve('.env'))
+} catch {}
+
 // All runtime settings come from environment variables (see .env.example).
 const req = (key, fallback) => {
   const v = process.env[key] ?? fallback

@@ -37,11 +37,18 @@ export async function ensureAvPermissions(video = true) {
  *           setSpeaker, renew(token), setRole(role) }.
  * With a mock token (server has no Agora keys) nothing connects; UI still works.
  */
-export function useAgoraChannel(agora, { video = true, enabled = true } = {}) {
+export function useAgoraChannel(
+  agora,
+  { video = true, enabled = true, only = null } = {},
+) {
   const [joined, setJoined] = useState(false);
   const [remoteUids, setRemoteUids] = useState([]);
   const [error, setError] = useState(null);
   const eng = useRef(null);
+  // `only`: play just this remote uid (a caller sharing the host's channel
+  // with other callers sees and hears only the host).
+  const onlyRef = useRef(only);
+  onlyRef.current = only;
 
   const key =
     agora && !agora.mock && enabled ? `${agora.channel}:${agora.uid}` : null;
@@ -75,8 +82,15 @@ export function useAgoraChannel(agora, { video = true, enabled = true } = {}) {
     let cancelled = false;
     const handler = {
       onJoinChannelSuccess: () => !cancelled && setJoined(true),
-      onUserJoined: (_c, uid) =>
-        !cancelled && setRemoteUids(l => (l.includes(uid) ? l : [...l, uid])),
+      onUserJoined: (_c, uid) => {
+        if (cancelled) return;
+        if (onlyRef.current && uid !== onlyRef.current) {
+          eng.current?.muteRemoteAudioStream(uid, true);
+          eng.current?.muteRemoteVideoStream(uid, true);
+          return;
+        }
+        setRemoteUids(l => (l.includes(uid) ? l : [...l, uid]));
+      },
       onUserOffline: (_c, uid) =>
         !cancelled && setRemoteUids(l => l.filter(x => x !== uid)),
       onError: (code, msg) =>
@@ -107,7 +121,8 @@ export function useAgoraChannel(agora, { video = true, enabled = true } = {}) {
         publishMicrophoneTrack: publisher,
         publishCameraTrack: publisher && video,
         autoSubscribeAudio: true,
-        autoSubscribeVideo: true,
+        // A voice call stays voice: no video in either direction.
+        autoSubscribeVideo: video,
       });
     })();
     return () => {
@@ -132,6 +147,7 @@ export function useAgoraChannel(agora, { video = true, enabled = true } = {}) {
     live: !!key,
     setMuted: m => eng.current?.muteLocalAudioStream(m),
     setCameraOn: on => {
+      if (!video) return;
       eng.current?.enableLocalVideo(on);
       eng.current?.muteLocalVideoStream(!on);
     },

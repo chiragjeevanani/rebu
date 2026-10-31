@@ -5,10 +5,37 @@ import { CONFIG_KEYS, DEFAULT_CONFIG } from './defaults.js'
 // cached in memory and refreshed whenever an admin saves.
 let cache = null
 
+/**
+ * Each level row carries its category's key, price cap and commission
+ * discount, so code can read one row. Re-derived whenever config changes.
+ */
+function deriveLevels(cfg) {
+  const cats = [...cfg.hostCategories].sort((a, b) => a.fromLevel - b.fromLevel)
+  const catOf = level => [...cats].reverse().find(c => level >= c.fromLevel) || cats[0]
+  cfg.hostLevels = cfg.hostLevels.map(l => {
+    const c = catOf(l.level)
+    return { level: l.level, giftCoins: l.giftCoins, category: c.key, maxRate: c.maxRate, commissionDiscount: c.commissionDiscount }
+  })
+  return cfg
+}
+
 export async function loadConfig() {
   const rows = await ConfigEntry.find().lean()
   const out = structuredClone(DEFAULT_CONFIG)
   for (const r of rows) out[r.key] = r.value
+  // Old minutes-based levels (before gift levels): replace with the new defaults.
+  if (!out.hostLevels?.[0] || out.hostLevels[0].giftCoins === undefined) {
+    out.hostLevels = structuredClone(DEFAULT_CONFIG.hostLevels)
+    await ConfigEntry.updateOne({ key: 'hostLevels' }, { value: out.hostLevels, updatedBy: 'system' }, { upsert: true })
+  }
+  // New settings fields get their defaults on servers that saved settings earlier.
+  out.settings.limits = { ...DEFAULT_CONFIG.settings.limits, ...out.settings.limits }
+  out.settings.hostApply = { ...DEFAULT_CONFIG.settings.hostApply, ...out.settings.hostApply }
+  out.economy = { ...DEFAULT_CONFIG.economy, ...out.economy }
+  // Gifts saved before animations existed get the bundled one for their key.
+  const anim = Object.fromEntries(DEFAULT_CONFIG.gifts.map(g => [g.key, g.animation]))
+  out.gifts = out.gifts.map(g => (g.animation === undefined && anim[g.key] ? { ...g, animation: anim[g.key] } : g))
+  deriveLevels(out)
   // First boot: store the defaults so admins edit real rows.
   const missing = CONFIG_KEYS.filter(k => !rows.some(r => r.key === k))
   if (missing.length) {
@@ -26,7 +53,7 @@ export function getConfig() {
 export async function setConfig(key, value, by) {
   if (!CONFIG_KEYS.includes(key)) throw new Error(`Unknown config key ${key}`)
   await ConfigEntry.updateOne({ key }, { value, updatedBy: by }, { upsert: true })
-  cache = { ...getConfig(), [key]: value }
+  cache = deriveLevels({ ...getConfig(), [key]: value })
   return cache[key]
 }
 
@@ -39,6 +66,9 @@ export function publicConfig() {
       messageCost: c.economy.messageCost,
       coinInr: c.economy.coinInr,
       minWithdraw: c.economy.minWithdraw,
+      minLiveBalance: c.economy.minLiveBalance,
+      maxGiftQuantity: c.economy.maxGiftQuantity,
+      welcomeBonusCoins: c.economy.welcomeBonusCoins,
       withdrawFee: c.economy.withdrawFee,
       payoutTime: c.economy.payoutTime,
       commission: c.economy.commission, // hosts see their share in the app
@@ -47,6 +77,8 @@ export function publicConfig() {
     coinPacks: c.coinPacks.filter(p => p.active),
     gifts: c.gifts.filter(g => g.active).sort((a, b) => a.order - b.order),
     hostLevels: c.hostLevels,
+    hostCategories: c.hostCategories,
+    senderTiers: c.senderTiers.filter(t => t.minCoins > 0),
     rateTiers: c.rateTiers,
     vipTiers: c.vipTiers.filter(t => t.active),
     royalClub: c.royalClub.filter(t => t.active),

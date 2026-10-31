@@ -16,9 +16,11 @@ import {
   Wallet,
 } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
-import { HOST_LEVELS, HOST_LEVEL_MAX, useApp } from '../../context/AppContext';
+import { useApp } from '../../context/AppContext';
+import { HostCategoryBadge } from '../../components/Social';
 import { ECONOMY, daysAgo, inr, netPerMinute, split } from '../../data/economy';
 import { num } from '../../utils/format';
+import { canGoLive, hostIdLabel } from '../../utils/hosting';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
 import Txt from '../../components/Txt';
@@ -39,10 +41,16 @@ function Stat({ label, value }) {
   );
 }
 
-function Progress({ value }) {
+function Progress({ value, color }) {
   return (
     <View style={styles.track}>
-      <View style={[styles.fill, { width: `${Math.min(value, 1) * 100}%` }]} />
+      <View
+        style={[
+          styles.fill,
+          { width: `${Math.min(value, 1) * 100}%` },
+          color && { backgroundColor: color },
+        ]}
+      />
     </View>
   );
 }
@@ -52,7 +60,8 @@ export default function HostCenterScreen({ navigation, tab }) {
     user,
     hostApp,
     hostLevel,
-    callMinutes,
+    hostMaxRate,
+    hostCategory,
     hostRates,
     setHostRates,
     hostOnline,
@@ -63,13 +72,30 @@ export default function HostCenterScreen({ navigation, tab }) {
     setHostAgency,
     refreshHostMoney,
     hostInfo,
+    config,
   } = useApp();
   const [sheet, setSheet] = useState(null); // prices | level | agency
   const [draft, setDraft] = useState(hostRates);
   const [code, setCode] = useState('');
-  const maxRate = HOST_LEVEL_MAX[hostLevel];
-  const next = HOST_LEVELS.find(l => l.level === hostLevel + 1);
-  const current = HOST_LEVELS.find(l => l.level === hostLevel);
+  const maxRate = hostMaxRate;
+  const next = hostInfo?.next; // { level, giftCoins, remaining, progress, maxRate, category }
+  const giftCoins = hostInfo?.giftCoins || 0;
+  const catColor = hostCategory?.color || colors.ink;
+  // Category rows for the levels sheet: level range, price cap, commission cut.
+  const categories = useMemo(() => {
+    const list = [...(hostInfo?.categories || [])].sort(
+      (a, b) => a.fromLevel - b.fromLevel,
+    );
+    const top = hostInfo?.levels?.length || 50;
+    return list.map((c, i) => ({
+      ...c,
+      toLevel: (list[i + 1]?.fromLevel || top + 1) - 1,
+      reached: hostLevel >= c.fromLevel,
+      current: c.key === hostCategory?.key,
+      giftCoins:
+        hostInfo?.levels?.find(l => l.level === c.fromLevel)?.giftCoins || 0,
+    }));
+  }, [hostInfo, hostLevel, hostCategory]);
 
   // Today's numbers, all from the earnings ledger.
   const t = useMemo(() => {
@@ -94,23 +120,26 @@ export default function HostCenterScreen({ navigation, tab }) {
 
   // Daily tasks: progress and claims are the server's (rewards land as bonus earnings).
   const [tasks, setTasks] = useState([]);
+  // Weekly / monthly targets set by the admin; the reward is bonus earnings.
+  const [targets, setTargets] = useState([]);
   const [claiming, setClaiming] = useState(null);
-  const loadTasks = useCallback(
-    () =>
-      get('/tasks')
-        .then(r =>
-          setTasks(
-            r.host.map(x => ({
-              ...x,
-              done: x.progress,
-              money: x.id === 'h_earn',
-              unit: x.id === 'h_live' ? 'min' : '',
-            })),
-          ),
-        )
-        .catch(() => {}),
-    [],
-  );
+  const loadTasks = useCallback(() => {
+    get('/host/targets')
+      .then(r => setTargets(r.items || []))
+      .catch(() => {});
+    return get('/tasks')
+      .then(r =>
+        setTasks(
+          r.host.map(x => ({
+            ...x,
+            done: x.progress,
+            money: x.id === 'h_earn',
+            unit: x.id === 'h_live' ? 'min' : '',
+          })),
+        ),
+      )
+      .catch(() => {});
+  }, []);
   useFocusEffect(
     useCallback(() => {
       loadTasks();
@@ -120,10 +149,10 @@ export default function HostCenterScreen({ navigation, tab }) {
   useEffect(() => {
     loadTasks();
   }, [hostInfo, loadTasks]);
-  const claim = async task => {
+  const claim = async (task, path = '/tasks') => {
     setClaiming(task.id);
     try {
-      await post(`/tasks/${task.id}/claim`);
+      await post(`${path}/${task.id}/claim`);
       await Promise.all([loadTasks(), refreshHostMoney()]);
     } catch (e) {
       Alert.alert('Couldn’t claim', e.message);
@@ -141,18 +170,31 @@ export default function HostCenterScreen({ navigation, tab }) {
         {/* Identity + availability */}
         <Card style={styles.me}>
           <View style={styles.meRow}>
-            <Image source={{ uri: photo }} style={styles.avatar} />
+            <Image
+              source={{ uri: photo }}
+              style={[styles.avatar, { borderColor: catColor }]}
+            />
             <View style={styles.flex}>
               <Txt variant="h3" numberOfLines={1}>
                 {hostApp.data?.name || user.name}
               </Txt>
               <Txt variant="small">
-                Host ID 1048 ·{' '}
+                Host ID {hostIdLabel(user)} ·{' '}
                 {hostAgency ? `Agency ${hostAgency}` : 'Independent'}
               </Txt>
             </View>
-            <Pressable style={styles.level} onPress={() => setSheet('level')}>
-              <Txt style={styles.levelText}>Lv {hostLevel}</Txt>
+            <Pressable onPress={() => setSheet('level')} hitSlop={6}>
+              {hostCategory ? (
+                <HostCategoryBadge
+                  category={hostCategory}
+                  level={hostLevel}
+                  large
+                />
+              ) : (
+                <View style={styles.level}>
+                  <Txt style={styles.levelText}>Lv {hostLevel}</Txt>
+                </View>
+              )}
             </Pressable>
           </View>
           <View style={styles.sep} />
@@ -174,14 +216,16 @@ export default function HostCenterScreen({ navigation, tab }) {
 
         {/* Main actions */}
         <View style={styles.actions}>
-          <Pressable
-            style={[styles.action, styles.actionLive]}
-            onPress={() => navigation.navigate('GoLive')}
-          >
-            <Video size={26} color={colors.white} fill={colors.white} />
-            <Txt style={styles.actionTitleLight}>Go live</Txt>
-            <Txt style={styles.actionSubLight}>Gifts, tickets & calls</Txt>
-          </Pressable>
+          {canGoLive(user, config) ? (
+            <Pressable
+              style={[styles.action, styles.actionLive]}
+              onPress={() => navigation.navigate('GoLive')}
+            >
+              <Video size={26} color={colors.white} fill={colors.white} />
+              <Txt style={styles.actionTitleLight}>Go live</Txt>
+              <Txt style={styles.actionSubLight}>Gifts, tickets & calls</Txt>
+            </Pressable>
+          ) : null}
           <Pressable
             style={styles.action}
             onPress={() => navigation.navigate('HostDashboard')}
@@ -254,25 +298,84 @@ export default function HostCenterScreen({ navigation, tab }) {
               </Txt>
               <Txt variant="small">
                 {next
-                  ? `${num(callMinutes)} / ${num(next.minutes)} call min`
-                  : `${num(callMinutes)} call min`}
+                  ? `${num(giftCoins)} / ${num(next.giftCoins)} gift coins`
+                  : `${num(giftCoins)} gift coins`}
               </Txt>
             </View>
-            <Progress
-              value={
-                next
-                  ? (callMinutes - current.minutes) /
-                    (next.minutes - current.minutes)
-                  : 1
-              }
-            />
+            <Progress value={next ? next.progress : 1} color={catColor} />
             <Txt variant="tiny" style={styles.levelNote}>
-              {next
-                ? `Level ${next.level} unlocks prices up to ${next.maxRate} coins/min ›`
-                : 'All prices unlocked.'}
+              {!next
+                ? 'Top level. All prices unlocked.'
+                : next.category?.key !== hostCategory?.key
+                ? `${num(next.remaining)} more gift coins to reach ${
+                    next.category?.name
+                  } (prices up to ${next.maxRate} coins/min) ›`
+                : `${num(next.remaining)} more gift coins to level ${
+                    next.level
+                  } ›`}
             </Txt>
           </Card>
         </Pressable>
+
+        {/* Targets */}
+        {targets.length ? (
+          <>
+            <Txt variant="h3" style={styles.h}>
+              Targets
+            </Txt>
+            <Card>
+              {targets.map((tg, i) => {
+                const days = Math.max(
+                  0,
+                  Math.ceil((new Date(tg.endsAt) - Date.now()) / 864e5),
+                );
+                const fmtVal = v =>
+                  tg.unit === 'inr' ? inr(v) : `${num(v)} ${tg.unit}`;
+                return (
+                  <View key={tg.id} style={i > 0 && styles.taskGap}>
+                    <View style={styles.taskHead}>
+                      <View style={styles.flex}>
+                        <Txt variant="label">{tg.title}</Txt>
+                        <Txt variant="tiny">
+                          {tg.period === 'weekly' ? 'This week' : 'This month'}{' '}
+                          · {fmtVal(tg.progress)} / {fmtVal(tg.goal)}
+                          {tg.claimed
+                            ? ''
+                            : ` · ${days ? `${days}d left` : 'ends today'}`}
+                        </Txt>
+                      </View>
+                      {tg.claimed ? (
+                        <Txt variant="label" color={colors.success}>
+                          Claimed
+                        </Txt>
+                      ) : (
+                        <Pressable
+                          disabled={!tg.done || !!claiming}
+                          onPress={() => claim(tg, '/host/targets')}
+                          style={[styles.claim, !tg.done && styles.claimOff]}
+                        >
+                          <Gem
+                            size={12}
+                            color={tg.done ? colors.white : colors.textMuted}
+                          />
+                          <Txt
+                            style={[
+                              styles.claimText,
+                              !tg.done && styles.claimTextOff,
+                            ]}
+                          >
+                            +{inr(tg.reward * ECONOMY.coinInr)}
+                          </Txt>
+                        </Pressable>
+                      )}
+                    </View>
+                    <Progress value={tg.progress / tg.goal} />
+                  </View>
+                );
+              })}
+            </Card>
+          </>
+        ) : null}
 
         {/* Daily tasks */}
         <Txt variant="h3" style={styles.h}>
@@ -402,41 +505,46 @@ export default function HostCenterScreen({ navigation, tab }) {
         title="Host levels"
       >
         <Txt variant="small">
-          Levels go up with connected call minutes. Higher levels can set higher
-          prices.
+          Your level goes up with the gift coins you receive (you have{' '}
+          {num(giftCoins)}). Each category unlocks higher prices and a lower
+          commission.
         </Txt>
         <View style={styles.levels}>
-          {HOST_LEVELS.map(l => {
-            const reached = hostLevel >= l.level;
-            return (
+          {categories.map(c => (
+            <View
+              key={c.key}
+              style={[styles.levelRow, c.current && styles.levelRowOn]}
+            >
               <View
-                key={l.level}
                 style={[
-                  styles.levelRow,
-                  l.level === hostLevel && styles.levelRowOn,
+                  styles.levelBadge,
+                  {
+                    backgroundColor: c.reached ? c.color : colors.surfaceMuted,
+                  },
                 ]}
               >
-                <View
-                  style={[styles.levelBadge, !reached && styles.levelBadgeOff]}
-                >
-                  {reached ? (
-                    <Txt style={styles.levelBadgeText}>{l.level}</Txt>
-                  ) : (
-                    <Lock size={14} color={colors.textMuted} />
-                  )}
-                </View>
-                <View style={styles.flex}>
-                  <Txt variant="label">Level {l.level}</Txt>
-                  <Txt variant="small">
-                    {l.minutes
-                      ? `${num(l.minutes)} call minutes`
-                      : 'Starting level'}
-                  </Txt>
-                </View>
-                <Txt variant="small">Up to {l.maxRate} coins/min</Txt>
+                {c.reached ? (
+                  <Gem size={14} color={colors.white} />
+                ) : (
+                  <Lock size={14} color={colors.textMuted} />
+                )}
               </View>
-            );
-          })}
+              <View style={styles.flex}>
+                <Txt variant="label">
+                  {c.name} · Lv {c.fromLevel}–{c.toLevel}
+                </Txt>
+                <Txt variant="small">
+                  {c.giftCoins
+                    ? `From ${num(c.giftCoins)} gift coins`
+                    : 'Starting category'}
+                  {c.commissionDiscount
+                    ? ` · ${c.commissionDiscount}% less commission`
+                    : ''}
+                </Txt>
+              </View>
+              <Txt variant="small">Up to {c.maxRate}/min</Txt>
+            </View>
+          ))}
         </View>
       </Sheet>
 
@@ -500,7 +608,7 @@ const styles = StyleSheet.create({
   body: { paddingHorizontal: spacing.md, paddingBottom: 24 },
   me: { paddingBottom: 0 },
   meRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  avatar: { width: 54, height: 54, borderRadius: 27 },
+  avatar: { width: 54, height: 54, borderRadius: 27, borderWidth: 2.5 },
   level: {
     paddingHorizontal: 10,
     height: 26,

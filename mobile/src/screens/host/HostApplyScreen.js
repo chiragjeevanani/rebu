@@ -24,7 +24,8 @@ import {
   X,
 } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
-import { HOST_LEVEL_MAX, useApp } from '../../context/AppContext';
+import { useApp } from '../../context/AppContext';
+import { womenOnly } from '../../utils/hosting';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
 import Txt from '../../components/Txt';
@@ -101,10 +102,12 @@ function Section({ title, sub, children }) {
 }
 
 export default function HostApplyScreen({ navigation, route }) {
-  const { user, hostApp, hostLevel, refreshHostApp } = useApp();
+  const { user, hostApp, hostMaxRate, refreshHostApp, config } = useApp();
+  // Women only: gender is fixed to Female instead of a choice.
+  const onlyWomen = womenOnly(config);
   // Resubmitting after a rejection: start from the saved answers.
   const prev = route.params?.resubmit ? hostApp.data || {} : {};
-  const maxRate = HOST_LEVEL_MAX[hostLevel];
+  const maxRate = hostMaxRate;
   const [step, setStep] = useState(0);
   // Fixed pixel sizes: % widths + aspectRatio lay out unevenly in wrapped rows.
   const { width: screenW } = useWindowDimensions();
@@ -112,7 +115,9 @@ export default function HostApplyScreen({ navigation, route }) {
   const slot = { width: slotW, height: Math.round(slotW * 1.25) };
 
   const [name, setName] = useState(prev.name || user.name || '');
-  const [gender, setGender] = useState(prev.gender || user.gender || null);
+  const [gender, setGender] = useState(
+    womenOnly(config) ? 'Female' : prev.gender || user.gender || null,
+  );
   const [dob, setDob] = useState(prev.dob || { d: '', m: '', y: '' });
   const [languages, setLanguages] = useState(
     prev.languages || ['Hindi', 'English'],
@@ -271,7 +276,7 @@ export default function HostApplyScreen({ navigation, route }) {
             />
             <Section title="Gender">
               <View style={styles.chips}>
-                {GENDERS.map(g => (
+                {(onlyWomen ? ['Female'] : GENDERS).map(g => (
                   <Chip
                     key={g}
                     label={g}

@@ -131,7 +131,7 @@ if (!demo || !h1 || !h3 || !h5) throw new Error('Seed the test DB first: MONGO_U
 await Call.deleteMany({})
 await Conversation.deleteMany({})
 await Message.deleteMany({})
-await User.updateMany({ phone: { $in: ['9000000001', '9000000003', '9000000005'] } }, { $set: { 'host.online': true, 'host.busy': false, blocked: [] } })
+await User.updateMany({ phone: { $in: ['9000000001', '9000000003', '9000000005'] } }, { $set: { 'host.online': true, 'host.busy': false, 'host.calls': 0, blocked: [] } })
 await User.updateMany({ phone: { $in: ['9000000002', '9000000004', '9000000006'] } }, { $set: { 'host.online': false, 'host.busy': false } })
 const setCoins = (u, coins) => User.updateOne({ _id: u._id }, { $set: { coins } })
 const coinsOf = async u => (await User.findById(u._id, { coins: 1 })).coins
@@ -158,9 +158,9 @@ try {
   const callId = start.call.id
   const inc = await s1.waitFor('call:incoming', d => d.call.id === callId)
   ok(inc.caller?.id === String(demo._id) && !('phone' in inc.caller), 'host gets call:incoming with caller.toPublic()')
-  ok((await User.findById(h1._id)).host.busy === true, 'host marked busy')
-  const busy = await api(T.h3, 'POST', '/calls', { hostId: String(h1._id), type: 'video' })
-  ok(busy.status === 409 && busy.error?.code === 'host_busy', 'second caller → 409 host_busy', busy)
+  const h1ring = (await User.findById(h1._id)).host
+  ok(h1ring.calls === 1 && h1ring.busy === false, 'host has one call slot in use (2 allowed)', h1ring)
+  ok(start.call.hostUid > 0 && start.call.callerUid > 0 && start.call.callerUid !== start.call.hostUid, 'call carries both Agora uids (callers play only the host)', start.call)
   const self = await api(T.h1, 'POST', '/calls', { hostId: String(h1._id), type: 'video' })
   ok(self.status === 400, 'cannot call yourself')
   const wrongAccept = await api(T.user, 'POST', `/calls/${callId}/accept`)
@@ -366,6 +366,39 @@ try {
   await setCoins(demo, 100)
   const g6 = await api(T.user, 'POST', '/gifts', { toId: String(h1._id), giftKey: 'rocket', context: { type: 'chat' } })
   ok(g6.status === 402, 'too expensive → 402')
+  // ----- quantity: several of ONE gift in one go -----
+  await setCoins(demo, 5000)
+  const qBal = await coinsOf(demo)
+  const qBefore = await hostBalance(h1._id)
+  const q1 = await api(T.user, 'POST', '/gifts', { toId: String(h1._id), giftKey: 'rose', quantity: 10, context: { type: 'chat' } })
+  ok(q1.status === 201 && q1.balance === qBal - 100 && q1.quantity === 10 && q1.total === 100 && q1.gift.count === 10, '10 roses cost 100 coins in one go', q1)
+  const qgr = await s1.waitFor('gift:received', d => d.gift.key === 'rose' && d.gift.count === 10)
+  ok(qgr.gift.coins === 10, 'host gets gift:received with count 10 (price stays per gift)')
+  const qm = await s1.waitFor('chat:message', d => d.message.type === 'gift' && d.message.gift.count === 10)
+  ok(qm.message.cost === 100, 'chat message records the total cost (100)')
+  ok(round2((await hostBalance(h1._id)).lifetime - qBefore.lifetime) === round2(100 * 0.8 * 0.5), 'host earns on all 10 roses')
+  ok(!!(await Earning.findOne({ host: h1._id, source: 'gift', coins: 100, createdAt: { $gte: RUN_START } })), 'one Earning row for the 10 roses')
+  const q1b = await api(T.user, 'POST', '/gifts', { toId: String(h1._id), giftKey: 'rose', context: { type: 'chat' } })
+  ok(q1b.status === 201 && q1b.quantity === 1 && q1b.total === 10, 'quantity defaults to 1')
+  const qCap = await api(T.user, 'POST', '/gifts', { toId: String(h1._id), giftKey: 'rose', quantity: 100, context: { type: 'chat' } })
+  ok(qCap.status === 400 && /99/.test(qCap.error?.message || ''), 'over the cap (99) is refused', qCap)
+  for (const [label, qty] of [['0', 0], ['negative', -3], ['fractional', 2.5], ['a string', '5']]) {
+    const bad = await api(T.user, 'POST', '/gifts', { toId: String(h1._id), giftKey: 'rose', quantity: qty, context: { type: 'chat' } })
+    ok(bad.status === 400, 'quantity ' + label + ' is refused', bad)
+  }
+  // Two different gifts can't go together: arrays / item lists are rejected, nothing is charged.
+  const balMix = await coinsOf(demo)
+  const mix1 = await api(T.user, 'POST', '/gifts', { toId: String(h1._id), giftKey: ['rose', 'rocket'], quantity: 10, context: { type: 'chat' } })
+  const mix2 = await api(T.user, 'POST', '/gifts', { toId: String(h1._id), gifts: [{ giftKey: 'rose', quantity: 10 }, { giftKey: 'rocket', quantity: 10 }], context: { type: 'chat' } })
+  const mix3 = await api(T.user, 'POST', '/gifts', { toId: String(h1._id), giftKey: 'rose', quantity: 10, extraGiftKey: 'rocket', context: { type: 'chat' } })
+  ok(mix1.status === 400 && mix2.status === 400 && mix3.status === 400, 'mixed gift types in one request are refused', [mix1.status, mix2.status, mix3.status])
+  ok((await coinsOf(demo)) === balMix, 'refused bulk sends charge nothing')
+  await setCoins(demo, 95)
+  const poorQ = await api(T.user, 'POST', '/gifts', { toId: String(h1._id), giftKey: 'rose', quantity: 10, context: { type: 'chat' } })
+  ok(poorQ.status === 402 && (await coinsOf(demo)) === 95, '10 roses with only 95 coins → 402, balance untouched', poorQ)
+  await setCoins(demo, 5000)
+  const lvq = await api(T.user, 'POST', '/gifts', { toId: String(h1._id), giftKey: 'car', quantity: 3, context: { type: 'live', id: lv.live.id } })
+  ok(lvq.status === 201 && lvq.total === 2997 && lvq.balance === 5000 - 2997, '3 sports cars in a live = 2,997 coins', lvq)
   await setCoins(demo, 1450)
   // gift during a connected call
   const cg = await api(T.user, 'POST', '/calls', { hostId: String(h5._id), type: 'voice' })
@@ -377,6 +410,36 @@ try {
   ok((await Call.findById(cg.call.id)).giftCoins === 99, 'call records gift coins')
   await api(T.user, 'POST', `/calls/${cg.call.id}/end`)
   s5.close()
+
+  // ---------- 7b. two calls at once ----------
+  section('Host takes two calls at once')
+  await setCoins(demo, 1450)
+  await User.updateOne({ _id: h3._id }, { $set: { coins: 1000 } })
+  const s5b = await connect(T.h5)
+  const ca = await api(T.user, 'POST', '/calls', { hostId: String(h5._id), type: 'video' })
+  await api(T.h5, 'POST', `/calls/${ca.call.id}/accept`)
+  const cb = await api(T.h3, 'POST', '/calls', { hostId: String(h5._id), type: 'video' })
+  ok(cb.status === 201 && cb.call.channel === ca.call.channel, 'second caller joins the host’s call channel', cb)
+  const incB = await s5b.waitFor('call:incoming', d => d.call.id === cb.call?.id)
+  ok(incB.joining === true, 'host is told the caller is joining a call in progress')
+  const full = (await User.findById(h5._id)).host
+  ok(full.calls === 2 && full.busy === true, 'host now full (2/2)', full)
+  const third = await api(T.h1, 'POST', '/calls', { hostId: String(h5._id), type: 'video' })
+  ok(third.status === 409 && third.error?.code === 'host_busy', 'a third caller → 409 host_busy', third)
+  const accB = await api(T.h5, 'POST', `/calls/${cb.call.id}/accept`)
+  ok(accB.status === 200 && accB.agora?.channel === ca.call.channel, 'host accepts the second call in the same channel')
+  const s3tick = await s3.waitFor('call:tick', d => d.callId === cb.call.id && d.minute === 1)
+  ok(s3tick.charged === 80, 'second caller billed separately at the host’s rate', s3tick)
+  await api(T.h3, 'POST', `/calls/${cb.call.id}/end`)
+  const afterB = (await User.findById(h5._id)).host
+  ok(afterB.calls === 1 && afterB.busy === false, 'second caller leaves → first call continues, slot freed', afterB)
+  ok((await Call.findById(ca.call.id)).status === 'connected', 'first call still connected')
+  const voice = await api(T.h3, 'POST', '/calls', { hostId: String(h5._id), type: 'voice' })
+  ok(voice.status === 409, 'a voice call can’t join a video call', voice)
+  await api(T.user, 'POST', `/calls/${ca.call.id}/end`)
+  const freed = (await User.findById(h5._id)).host
+  ok(freed.calls === 0 && freed.busy === false, 'all slots free after both calls', freed)
+  s5b.close()
 
   // ---------- 8. socket disconnect grace ----------
   section('Socket disconnect (needs callSocketHooks wired in server.js)')

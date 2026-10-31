@@ -12,6 +12,7 @@ export default defineConfig({
     proxy: {
       '/api': { target: BACKEND, changeOrigin: true },
       '/uploads': { target: BACKEND, changeOrigin: true },
+      '/static': { target: BACKEND, changeOrigin: true },
       '/socket.io': { target: BACKEND, changeOrigin: true, ws: true },
     },
   },

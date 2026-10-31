@@ -24,7 +24,7 @@ import {
   Video,
 } from 'lucide-react-native';
 import { colors, fonts } from '../../theme';
-import { HOST_LEVEL_MAX, useApp } from '../../context/AppContext';
+import { useApp } from '../../context/AppContext';
 import Txt from '../../components/Txt';
 import Sheet from '../../components/Sheet';
 import Chip from '../../components/Chip';
@@ -52,7 +52,7 @@ const HINTS = {
 
 export default function GoLiveScreen({ navigation }) {
   const insets = useSafeAreaInsets();
-  const { user, isHost, hostRates, setHostRates, hostLevel } = useApp();
+  const { user, isHost, hostRates, setHostRates, hostMaxRate } = useApp();
   const first = user.name.split(' ')[0];
 
   const [mode, setMode] = useState('live');
@@ -274,7 +274,7 @@ export default function GoLiveScreen({ navigation }) {
               dark
               kind="video"
               value={rate}
-              maxRate={HOST_LEVEL_MAX[hostLevel]}
+              maxRate={hostMaxRate}
               onChange={setRate}
             />
           </>

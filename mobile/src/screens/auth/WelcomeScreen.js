@@ -78,8 +78,8 @@ export default function WelcomeScreen({ navigation }) {
         ))}
         <LinearGradient
           colors={[
-            'rgba(250,247,251,0)',
-            'rgba(250,247,251,0.7)',
+            'rgba(243,238,251,0)',
+            'rgba(243,238,251,0.7)',
             colors.background,
           ]}
           locations={[0.35, 0.7, 1]}
@@ -94,7 +94,7 @@ export default function WelcomeScreen({ navigation }) {
       </View>
 
       <View style={[styles.bottom, { paddingBottom: insets.bottom + 20 }]}>
-        <LogoBadge size={124} style={styles.badge} />
+        <LogoBadge size={172} style={styles.badge} />
         <View style={styles.liveTag}>
           <Video size={13} color={colors.secondary} />
           <Txt variant="tiny" color={colors.secondary}>
@@ -196,7 +196,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     marginTop: -30,
   },
-  badge: { marginBottom: 4 },
+  badge: { marginTop: -40, marginBottom: 4 },
   liveTag: {
     flexDirection: 'row',
     alignItems: 'center',

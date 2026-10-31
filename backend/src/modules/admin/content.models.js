@@ -51,6 +51,7 @@ const notificationSchema = new Schema(
     status: { type: String, enum: ['sent', 'scheduled', 'draft', 'cancelled'], default: 'draft', index: true },
     delivered: { type: Number, default: 0 },
     opened: { type: Number, default: 0 },
+    pushed: { type: Number, default: 0 }, // phone pushes FCM accepted
     createdBy: String,
   },
   { timestamps: true },

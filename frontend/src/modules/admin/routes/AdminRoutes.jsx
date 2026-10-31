@@ -11,6 +11,7 @@ import UsersPage from '../pages/users/UsersPage'
 import UserDetailPage from '../pages/users/UserDetailPage'
 import HostsPage from '../pages/hosts/HostsPage'
 import HostDetailPage from '../pages/hosts/HostDetailPage'
+import TargetsPage from '../pages/hosts/TargetsPage'
 import ApplicationsPage from '../pages/hosts/ApplicationsPage'
 import ApplicationReviewPage from '../pages/hosts/ApplicationReviewPage'
 import AgenciesPage from '../pages/hosts/AgenciesPage'
@@ -27,6 +28,7 @@ import EconomyPage from '../pages/monetization/EconomyPage'
 import CoinPacksPage from '../pages/monetization/CoinPacksPage'
 import GiftsPage from '../pages/monetization/GiftsPage'
 import HostLevelsPage from '../pages/monetization/HostLevelsPage'
+import SenderFramesPage from '../pages/monetization/SenderFramesPage'
 import VipPage from '../pages/monetization/VipPage'
 import StoreTasksPage from '../pages/monetization/StoreTasksPage'
 import BannersPage from '../pages/content/BannersPage'
@@ -100,6 +102,8 @@ export default function AdminRoutes() {
         <Route path="users/:id" element={g('users', <UserDetailPage />)} />
         <Route path="hosts" element={g('hosts', <HostsPage />)} />
         <Route path="hosts/:id" element={g('hosts', <HostDetailPage />)} />
+        <Route path="host-targets" element={g('hosts', <TargetsPage />)} />
+        <Route path="host-targets/:id" element={g('hosts', <TargetsPage />)} />
         <Route path="host-applications" element={g('applications', <ApplicationsPage />)} />
         <Route path="host-applications/:id" element={g('applications', <ApplicationReviewPage />)} />
         <Route path="agencies" element={g('agencies', <AgenciesPage />)} />
@@ -116,6 +120,7 @@ export default function AdminRoutes() {
         <Route path="monetization/coin-packs" element={g('monetization', <CoinPacksPage />)} />
         <Route path="monetization/gifts" element={g('monetization', <GiftsPage />)} />
         <Route path="monetization/host-levels" element={g('monetization', <HostLevelsPage />)} />
+        <Route path="monetization/frames" element={g('monetization', <SenderFramesPage />)} />
         <Route path="monetization/vip" element={g('monetization', <VipPage />)} />
         <Route path="monetization/store" element={g('monetization', <StoreTasksPage />)} />
         <Route path="content/banners" element={g('content', <BannersPage />)} />

@@ -25,7 +25,7 @@ export async function ensureConversation(a, b) {
   }
 }
 
-const preview = m => (m.type === 'image' ? '📷 Photo' : m.type === 'gift' ? `🎁 ${m.gift?.name || 'Gift'}` : m.text)
+const preview = m => (m.type === 'image' ? '📷 Photo' : m.type === 'gift' ? `🎁 ${m.gift?.name || 'Gift'}${m.gift?.count > 1 ? ` ×${m.gift.count}` : ''}` : m.text)
 
 /** Writes a message and bumps the conversation (unhides it for both, +1 unread for the receiver). */
 export async function appendMessage(conv, doc, session) {

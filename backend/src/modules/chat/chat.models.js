@@ -47,7 +47,7 @@ const messageSchema = new Schema(
     type: { type: String, enum: ['text', 'image', 'gift'], required: true },
     text: { type: String, default: '' },
     imageUrl: String,
-    gift: { key: String, name: String, emoji: String, coins: Number },
+    gift: { key: String, name: String, emoji: String, coins: Number, count: Number },
     cost: { type: Number, default: 0 }, // coins the sender paid
     greeting: { type: Boolean, default: undefined }, // a free "Say hi" opener
     readAt: { type: Date, default: null },

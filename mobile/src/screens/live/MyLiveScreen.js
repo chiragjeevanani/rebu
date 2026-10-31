@@ -42,6 +42,7 @@ import Sheet from '../../components/Sheet';
 import Button from '../../components/Button';
 import ListRow from '../../components/ListRow';
 import { useSecureScreen } from '../../utils/secure';
+import { giftText } from '../../utils/gifts';
 import { RtcSurfaceView, RtcTextureView } from 'react-native-agora';
 import { get, post } from '../../api/client';
 import { useSocketEvent } from '../../api/socket';
@@ -378,7 +379,7 @@ export default function MyLiveScreen({ navigation, route }) {
                     <Txt style={styles.msgMuted}>followed you ❤️</Txt>
                   ) : m.gift ? (
                     <Txt style={styles.msgGift}>
-                      sent {m.gift.emoji} {m.gift.name}
+                      sent {giftText(m.gift)}
                     </Txt>
                   ) : (
                     <Txt style={styles.msgText}>{m.text}</Txt>

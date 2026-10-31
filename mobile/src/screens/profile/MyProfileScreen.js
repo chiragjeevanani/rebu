@@ -30,6 +30,8 @@ import Txt from '../../components/Txt';
 import ListRow, { Card } from '../../components/ListRow';
 import { VipBadge } from '../../components/Social';
 import { CoinIcon } from '../../components/CoinPill';
+import { canApplyToHost } from '../../utils/hosting';
+import { APP_VERSION } from '../../api/client';
 
 const TOOLS = [
   { key: 'Diamonds', emoji: '💎', colors: ['#F2F2F4', '#F2F2F4'] },
@@ -37,6 +39,49 @@ const TOOLS = [
   { key: 'Tasks', emoji: '✅', colors: ['#F2F2F4', '#F2F2F4'] },
   { key: 'Family', emoji: '🏠', colors: ['#F2F2F4', '#F2F2F4'] },
 ];
+
+/** Sender frame from lifetime coins bought, and how far the next one is. */
+function SenderFrameCard({ tier, tiers, bought, onPress }) {
+  const list = [...(tiers || [])].sort((a, b) => a.minCoins - b.minCoins);
+  if (!list.length) return null;
+  const next = list.find(t => t.minCoins > bought);
+  const from = tier ? list.find(t => t.key === tier.key)?.minCoins || 0 : 0;
+  const progress = next
+    ? Math.min(1, (bought - from) / Math.max(1, next.minCoins - from))
+    : 1;
+  const color = tier?.color || colors.textFaint;
+  return (
+    <Pressable style={styles.frameCard} onPress={onPress}>
+      <View style={[styles.frameRing, { borderColor: color }]}>
+        <Crown size={16} color={color} />
+      </View>
+      <View style={styles.flex}>
+        <Txt variant="h3">{tier ? `${tier.name} frame` : 'Sender frame'}</Txt>
+        <Txt variant="small" numberOfLines={2}>
+          {next
+            ? `Buy ${num(next.minCoins - bought)} more coins for the ${
+                next.name
+              } frame`
+            : 'You have the top frame. Everyone sees it on your photo.'}
+        </Txt>
+        {next ? (
+          <View style={styles.frameTrack}>
+            <View
+              style={[
+                styles.frameFill,
+                {
+                  width: `${Math.round(progress * 100)}%`,
+                  backgroundColor: next.color,
+                },
+              ]}
+            />
+          </View>
+        ) : null}
+      </View>
+      <ChevronRight size={20} color={colors.textFaint} />
+    </Pressable>
+  );
+}
 
 export default function MyProfileScreen({ navigation }) {
   const {
@@ -79,7 +124,14 @@ export default function MyProfileScreen({ navigation }) {
         <View>
           <Image
             source={{ uri: user.photos[0] }}
-            style={[styles.avatar, frame && styles.avatarFramed]}
+            style={[
+              styles.avatar,
+              frame && styles.avatarFramed,
+              user.senderTier && {
+                borderWidth: 3,
+                borderColor: user.senderTier.color,
+              },
+            ]}
           />
           {frame ? <Txt style={styles.frameEmoji}>{frame.emoji}</Txt> : null}
         </View>
@@ -127,6 +179,13 @@ export default function MyProfileScreen({ navigation }) {
           </Pressable>
         ))}
       </View>
+
+      <SenderFrameCard
+        tier={user.senderTier}
+        tiers={config?.senderTiers}
+        bought={user.server?.coinsBought || 0}
+        onPress={() => navigation.navigate('Wallet')}
+      />
 
       {isHost ? (
         <Card padded={false} style={styles.section}>
@@ -270,7 +329,9 @@ export default function MyProfileScreen({ navigation }) {
           subtitle="Items you own"
           onPress={() => navigation.navigate('MyItems')}
         />
-        {isHost || hostApp.status !== 'none' ? null : (
+        {isHost ||
+        hostApp.status !== 'none' ||
+        !canApplyToHost(user, config) ? null : (
           <ListRow
             icon={Crown}
             title="Become a host"
@@ -321,7 +382,7 @@ export default function MyProfileScreen({ navigation }) {
         <ListRow icon={LogOut} title="Log out" danger onPress={signOut} last />
       </Card>
       <Txt variant="tiny" center style={styles.version}>
-        REBU v1.3.0
+        REBU v{APP_VERSION}
       </Txt>
     </Screen>
   );
@@ -362,6 +423,32 @@ const styles = StyleSheet.create({
   stats: { flexDirection: 'row', marginTop: 20, marginHorizontal: spacing.md },
   stat: { flex: 1, alignItems: 'center' },
   section: { marginHorizontal: spacing.md, marginTop: 16 },
+  frameCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginHorizontal: spacing.md,
+    marginTop: 16,
+    padding: 14,
+    borderRadius: radius.lg,
+    backgroundColor: colors.surface,
+  },
+  frameRing: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  frameTrack: {
+    height: 6,
+    borderRadius: 3,
+    marginTop: 8,
+    backgroundColor: colors.surfaceMuted,
+    overflow: 'hidden',
+  },
+  frameFill: { height: 6, borderRadius: 3 },
   rechargeHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   reward: {
     backgroundColor: colors.primary,

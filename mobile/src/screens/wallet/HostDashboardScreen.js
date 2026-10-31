@@ -24,6 +24,7 @@ import {
   timeLabel,
 } from '../../data/economy';
 import { num } from '../../utils/format';
+import { canGoLive, hostIdLabel } from '../../utils/hosting';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
 import Txt from '../../components/Txt';
@@ -134,7 +135,8 @@ function WeekChart({ earnings }) {
 
 export default function HostDashboardScreen({ navigation }) {
   useSecureScreen();
-  const { earnings, balance, hostAgency, reportEarning } = useApp();
+  const { earnings, balance, hostAgency, reportEarning, user, config } =
+    useApp();
   const [range, setRange] = useState('week');
   const [filter, setFilter] = useState('all');
   const [open, setOpen] = useState(null);
@@ -176,7 +178,7 @@ export default function HostDashboardScreen({ navigation }) {
     <Screen scroll>
       <Header
         title="Earnings"
-        subtitle={`Host ID 1048 · ${
+        subtitle={`Host ID ${hostIdLabel(user)} · ${
           hostAgency ? `Agency ${hostAgency}` : 'Independent'
         }`}
         right={
@@ -223,13 +225,15 @@ export default function HostDashboardScreen({ navigation }) {
               Turn on “Available for calls” or go live — every paid minute,
               message and gift shows up here.
             </Txt>
-            <Button
-              title="Go live"
-              size="md"
-              icon={Video}
-              style={styles.emptyBtn}
-              onPress={() => navigation.navigate('GoLive')}
-            />
+            {canGoLive(user, config) ? (
+              <Button
+                title="Go live"
+                size="md"
+                icon={Video}
+                style={styles.emptyBtn}
+                onPress={() => navigation.navigate('GoLive')}
+              />
+            ) : null}
           </Card>
         ) : (
           <>

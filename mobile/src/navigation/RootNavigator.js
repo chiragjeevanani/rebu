@@ -1,15 +1,22 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   NavigationContainer,
   DefaultTheme,
   createNavigationContainerRef,
 } from '@react-navigation/native';
-import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { View } from 'react-native';
+import {
+  TransitionPresets,
+  createStackNavigator,
+} from '@react-navigation/stack';
+import { StyleSheet, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { createMaterialTopTabNavigator } from '@react-navigation/material-top-tabs';
 import { colors } from '../theme';
 import { useApp } from '../context/AppContext';
 import TabBar from './TabBar';
+import { FrameContext } from './headerSlots';
+import { StackHeader } from '../components/Header';
+import { TabTopBarRight, TopBarView } from '../components/Live';
 
 import WelcomeScreen from '../screens/auth/WelcomeScreen';
 import PhoneLoginScreen from '../screens/auth/PhoneLoginScreen';
@@ -79,9 +86,8 @@ import GoLiveScreen from '../screens/live/GoLiveScreen';
 import MyLiveScreen from '../screens/live/MyLiveScreen';
 import LiveSummaryScreen from '../screens/live/LiveSummaryScreen';
 
-const Stack = createNativeStackNavigator();
+const Stack = createStackNavigator();
 const Tab = createMaterialTopTabNavigator();
-const renderTabBar = props => <TabBar {...props} />;
 const LazyPlaceholder = () => (
   <View style={{ flex: 1, backgroundColor: colors.background }} />
 );
@@ -101,11 +107,36 @@ const HostTabScreen = props => <HostCenterScreen {...props} tab />;
 // Recharge opened from anywhere (low balance, gifts…): the Coins page with a back button.
 const WalletScreen = props => <CoinsScreen {...props} stack />;
 
+// Tells each tab's TopBar to hand its icons to the shared bar above the pages.
+const tabLayout = ({ route, children }) => (
+  <FrameContext.Provider
+    value={{ kind: 'tabs', routeKey: route.key, headerShown: true }}
+  >
+    {children}
+  </FrameContext.Provider>
+);
+
 function MainTabs() {
   const { isHost } = useApp();
+  const insets = useSafeAreaInsets();
+  const [focused, setFocused] = useState(null);
+  return (
+    // One top bar above the pager stays put while the pages swipe under it.
+    <View style={[styles.tabs, { paddingTop: insets.top }]}>
+      <TopBarView right={<TabTopBarRight routeKey={focused} />} />
+      <MainPager isHost={isHost} onFocus={setFocused} />
+    </View>
+  );
+}
+
+const renderTabBar = props => <TabBar {...props} />;
+
+function MainPager({ isHost, onFocus }) {
   return (
     // Pager-style tabs: swipe left/right between pages.
     <Tab.Navigator
+      screenLayout={tabLayout}
+      screenListeners={({ route }) => ({ focus: () => onFocus(route.key) })}
       tabBarPosition="bottom"
       tabBar={renderTabBar}
       screenOptions={{
@@ -127,7 +158,28 @@ function MainTabs() {
   );
 }
 
-const immersive = { animation: 'fade', presentation: 'fullScreenModal' };
+// Full-screen experiences (calls, lives, rooms) fade in without the header.
+const immersive = {
+  cardStyleInterpolator: ({ current }) => ({
+    cardStyle: { opacity: current.progress },
+  }),
+  gestureEnabled: false,
+};
+// Screens that use <Header/> get the shared header that stays still between them.
+const withHeader = { headerShown: true };
+
+const stackLayout = ({ route, options, children }) => (
+  <FrameContext.Provider
+    value={{
+      kind: 'stack',
+      routeKey: route.key,
+      headerShown: !!options.headerShown,
+    }}
+  >
+    {children}
+  </FrameContext.Provider>
+);
+const renderHeader = props => <StackHeader {...props} />;
 
 const navigationRef = createNavigationContainerRef();
 
@@ -149,56 +201,140 @@ export default function RootNavigator() {
   return (
     <NavigationContainer ref={navigationRef} theme={theme}>
       <Stack.Navigator
+        screenLayout={stackLayout}
         screenOptions={{
+          ...TransitionPresets.SlideFromRightIOS,
           headerShown: false,
-          animation: 'slide_from_right',
-          contentStyle: { backgroundColor: colors.background },
+          headerMode: 'float',
+          header: renderHeader,
+          cardStyle: { backgroundColor: colors.background },
         }}
       >
         {!authed ? (
           <>
             <Stack.Screen name="Welcome" component={WelcomeScreen} />
-            <Stack.Screen name="PhoneLogin" component={PhoneLoginScreen} />
-            <Stack.Screen name="Otp" component={OtpScreen} />
-            <Stack.Screen name="EmailAuth" component={EmailAuthScreen} />
+            <Stack.Screen
+              name="PhoneLogin"
+              component={PhoneLoginScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Otp"
+              component={OtpScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="EmailAuth"
+              component={EmailAuthScreen}
+              options={withHeader}
+            />
             <Stack.Screen
               name="ForgotPassword"
               component={ForgotPasswordScreen}
+              options={withHeader}
             />
-            <Stack.Screen name="ProfileSetup" component={ProfileSetupScreen} />
+            <Stack.Screen
+              name="ProfileSetup"
+              component={ProfileSetupScreen}
+              options={withHeader}
+            />
           </>
         ) : (
           <>
             <Stack.Screen name="Main" component={MainTabs} />
-            <Stack.Screen name="Me" component={MyProfileScreen} />
+            <Stack.Screen
+              name="Me"
+              component={MyProfileScreen}
+              options={withHeader}
+            />
             <Stack.Screen name="Moments" component={MomentsScreen} />
             <Stack.Screen name="Rooms" component={RoomsScreen} />
-            <Stack.Screen name="HostList" component={HostListScreen} />
+            <Stack.Screen
+              name="HostList"
+              component={HostListScreen}
+              options={withHeader}
+            />
             <Stack.Screen
               name="LiveRoom"
               component={LiveRoomScreen}
               options={immersive}
             />
             <Stack.Screen name="HostProfile" component={HostProfileScreen} />
-            <Stack.Screen name="Spark" component={MatchScreen} />
-            <Stack.Screen name="Search" component={SearchScreen} />
-            <Stack.Screen name="Leaderboard" component={LeaderboardScreen} />
-            <Stack.Screen name="CreateMoment" component={CreateMomentScreen} />
+            <Stack.Screen
+              name="Spark"
+              component={MatchScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Search"
+              component={SearchScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Leaderboard"
+              component={LeaderboardScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="CreateMoment"
+              component={CreateMomentScreen}
+              options={withHeader}
+            />
             <Stack.Screen
               name="Room"
               component={RoomScreen}
               options={immersive}
             />
-            <Stack.Screen name="CreateRoom" component={CreateRoomScreen} />
-            <Stack.Screen name="Vip" component={VipScreen} />
-            <Stack.Screen name="RoyalClub" component={AristocracyScreen} />
-            <Stack.Screen name="Diamonds" component={DiamondsScreen} />
-            <Stack.Screen name="Visitors" component={VisitorsScreen} />
-            <Stack.Screen name="Tasks" component={TasksScreen} />
-            <Stack.Screen name="Family" component={FamilyScreen} />
-            <Stack.Screen name="Events" component={EventCenterScreen} />
-            <Stack.Screen name="Store" component={StoreScreen} />
-            <Stack.Screen name="MyItems" component={BackpackScreen} />
+            <Stack.Screen
+              name="CreateRoom"
+              component={CreateRoomScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Vip"
+              component={VipScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="RoyalClub"
+              component={AristocracyScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Diamonds"
+              component={DiamondsScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Visitors"
+              component={VisitorsScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Tasks"
+              component={TasksScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Family"
+              component={FamilyScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Events"
+              component={EventCenterScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Store"
+              component={StoreScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="MyItems"
+              component={BackpackScreen}
+              options={withHeader}
+            />
             <Stack.Screen
               name="RandomCall"
               component={RandomCallScreen}
@@ -214,39 +350,102 @@ export default function RootNavigator() {
               component={CallEndedScreen}
               options={immersive}
             />
-            <Stack.Screen name="CallHistory" component={CallHistoryScreen} />
+            <Stack.Screen
+              name="CallHistory"
+              component={CallHistoryScreen}
+              options={withHeader}
+            />
             <Stack.Screen
               name="IncomingCall"
               component={IncomingCallScreen}
               options={immersive}
             />
             <Stack.Screen name="ChatRoom" component={ChatRoomScreen} />
-            <Stack.Screen name="EditProfile" component={EditProfileScreen} />
-            <Stack.Screen name="Settings" component={SettingsScreen} />
+            <Stack.Screen
+              name="EditProfile"
+              component={EditProfileScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Settings"
+              component={SettingsScreen}
+              options={withHeader}
+            />
             <Stack.Screen
               name="DeleteAccount"
               component={DeleteAccountScreen}
+              options={withHeader}
             />
             <Stack.Screen
               name="Notifications"
               component={NotificationsScreen}
+              options={withHeader}
             />
-            <Stack.Screen name="BlockedUsers" component={BlockedUsersScreen} />
-            <Stack.Screen name="Followers" component={FollowersScreen} />
-            <Stack.Screen name="Report" component={ReportScreen} />
-            <Stack.Screen name="Verification" component={VerificationScreen} />
-            <Stack.Screen name="Content" component={ContentScreen} />
-            <Stack.Screen name="Wallet" component={WalletScreen} />
+            <Stack.Screen
+              name="BlockedUsers"
+              component={BlockedUsersScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Followers"
+              component={FollowersScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Report"
+              component={ReportScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Verification"
+              component={VerificationScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Content"
+              component={ContentScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Wallet"
+              component={WalletScreen}
+              options={withHeader}
+            />
             <Stack.Screen
               name="HostDashboard"
               component={HostDashboardScreen}
+              options={withHeader}
             />
-            <Stack.Screen name="Withdraw" component={WithdrawScreen} />
-            <Stack.Screen name="Transactions" component={TransactionsScreen} />
-            <Stack.Screen name="BecomeHost" component={BecomeHostScreen} />
-            <Stack.Screen name="HostApply" component={HostApplyScreen} />
-            <Stack.Screen name="HostStatus" component={HostStatusScreen} />
-            <Stack.Screen name="HostCenter" component={HostCenterScreen} />
+            <Stack.Screen
+              name="Withdraw"
+              component={WithdrawScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="Transactions"
+              component={TransactionsScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="BecomeHost"
+              component={BecomeHostScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="HostApply"
+              component={HostApplyScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="HostStatus"
+              component={HostStatusScreen}
+              options={withHeader}
+            />
+            <Stack.Screen
+              name="HostCenter"
+              component={HostCenterScreen}
+              options={withHeader}
+            />
             <Stack.Screen
               name="GoLive"
               component={GoLiveScreen}
@@ -272,3 +471,7 @@ export default function RootNavigator() {
     </NavigationContainer>
   );
 }
+
+const styles = StyleSheet.create({
+  tabs: { flex: 1, backgroundColor: colors.background },
+});

@@ -1,6 +1,9 @@
 // Thin fetch wrapper for the REBU backend. In dev VITE_API_URL is unset and
-// requests go through the Vite proxy (/api, /uploads, /socket.io).
+// requests go through the Vite proxy (/api, /uploads, /static, /socket.io).
 export const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
+
+/** Server files: bundled ones are server-relative (/static/gifts/rose.json), uploads are absolute. */
+export const assetUrl = u => (!u ? '' : /^https?:\/\//i.test(u) ? u : `${API_BASE}${u.startsWith('/') ? '' : '/'}${u}`)
 
 const TOKEN_KEY = 'rebu.admin.token'
 

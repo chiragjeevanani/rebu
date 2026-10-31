@@ -238,8 +238,13 @@ check('audit entry "Updated economy: messageCost: …"', aud?.action.includes(`m
 check('public /api/config reflects it', (await call('GET', '/api/config')).data.economy.messageCost === econ0.messageCost + 1)
 await fin.put('/api/admin/config/economy', econ0)
 const cfg = (await sup.get('/api/admin/config')).data.config
-r = await fin.put('/api/admin/config/hostLevels', cfg.hostLevels.map((l, i) => (i === 2 ? { ...l, minutes: 100 } : l)))
-check('hostLevels minutes not increasing → 400', r.status === 400, r.data)
+r = await fin.put('/api/admin/config/hostLevels', cfg.hostLevels.map((l, i) => (i === 2 ? { ...l, giftCoins: 100 } : l)))
+check('hostLevels gift coins not increasing → 400', r.status === 400, r.data)
+r = await fin.put('/api/admin/config/hostCategories', cfg.hostCategories.map((c, i) => (i === 1 ? { ...c, maxRate: 90 } : c)))
+check('edit a host category', r.status === 200, r.data)
+r = await fin.get('/api/admin/config')
+check('levels pick up the category price cap', r.data.config.hostLevels.find(l => l.level === 11)?.maxRate === 90, r.data.config.hostLevels[10])
+await fin.put('/api/admin/config/hostCategories', cfg.hostCategories)
 r = await fin.put('/api/admin/config/rateTiers', { ...cfg.rateTiers, video: [40, 30, 60] })
 check('rateTiers unsorted → 400', r.status === 400, r.data)
 r = await fin.put('/api/admin/config/coinPacks', [...cfg.coinPacks, { ...cfg.coinPacks[0] }])
@@ -332,6 +337,17 @@ check('at least one active super_admin remains', (await Admin.countDocuments({ r
 r = await sup.get('/api/admin/audit?admin=Om%20Parteki&days=1')
 check('audit filter by admin + date', r.status === 200 && r.data.items.length > 0 && r.data.items.every(x => x.admin === 'Om Parteki'), r.data.items?.slice(0, 2))
 check('every audit row today has an action', !(await AuditLog.exists({ createdAt: { $gte: new Date(Date.now() - 3600000) }, action: { $in: [null, ''] } })))
+
+// Hosting is women-only: an application from a man can't be approved.
+const { HostApplication } = await import('../src/modules/hosts/hosts.models.js')
+const maleApp = await HostApplication.create({
+  user: u1._id, name: 'Test Applicant', gender: 'Male', dob: new Date('1998-01-01'),
+  languages: ['Hindi'], photos: ['https://i.pravatar.cc/800?img=3'], rates: { video: 40, voice: 20 }, status: 'pending',
+})
+r = await sup.post(`/api/admin/applications/${maleApp._id}/approve`)
+check('male application can’t be approved (women only) → 400', r.status === 400, r.data)
+check('…and it stays pending', (await HostApplication.findById(maleApp._id)).status === 'pending')
+await HostApplication.deleteOne({ _id: maleApp._id })
 
 console.log(`\n${pass} passed, ${fails.length} failed`)
 if (fails.length) console.log('Failed:\n - ' + fails.join('\n - '))

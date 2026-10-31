@@ -38,11 +38,14 @@ import Sheet from '../../components/Sheet';
 import ListRow, { Card } from '../../components/ListRow';
 import GiftSheet from '../../components/GiftSheet';
 import { CoinIcon } from '../../components/CoinPill';
+import { HostCategoryBadge } from '../../components/Social';
 
 const { width: W } = Dimensions.get('window');
 
 export default function HostProfileScreen({ navigation, route }) {
   const { host } = route.params;
+  // The host's category (Iron … Diamond) tints the profile.
+  const tone = host.category?.color;
   const insets = useSafeAreaInsets();
   const [photo, setPhoto] = useState(0);
   const { following: followList, toggleFollow } = useApp();
@@ -109,7 +112,12 @@ export default function HostProfileScreen({ navigation, route }) {
           </View>
         </View>
 
-        <View style={styles.sheet}>
+        <View
+          style={[
+            styles.sheet,
+            tone && { borderTopWidth: 4, borderColor: tone },
+          ]}
+        >
           <View style={styles.nameRow}>
             <Txt variant="display" style={styles.name}>
               {host.name}, {host.age}
@@ -133,6 +141,7 @@ export default function HostProfileScreen({ navigation, route }) {
             </Pressable>
           </View>
           <View style={styles.metaRow}>
+            <HostCategoryBadge category={host.category} level={host.level} />
             <View style={styles.metaItem}>
               <MapPin size={15} color={colors.textMuted} />
               <Txt variant="small">
@@ -172,7 +181,7 @@ export default function HostProfileScreen({ navigation, route }) {
             </View>
           </View>
 
-          <View style={styles.stats}>
+          <View style={[styles.stats, tone && { borderColor: tone + '55' }]}>
             {[
               { icon: Star, value: host.rating, label: 'Rating' },
               {
@@ -191,7 +200,7 @@ export default function HostProfileScreen({ navigation, route }) {
                 style={[styles.stat, i < 2 && styles.statDivider]}
               >
                 <View style={styles.statTop}>
-                  <s.icon size={15} color={colors.primary} />
+                  <s.icon size={15} color={tone || colors.primary} />
                   <Txt variant="h3">{s.value}</Txt>
                 </View>
                 <Txt variant="small">{s.label}</Txt>
@@ -327,6 +336,8 @@ export default function HostProfileScreen({ navigation, route }) {
       </Sheet>
       <GiftSheet
         to={host.name}
+        toId={host.id}
+        context={{ type: 'chat' }}
         visible={gift}
         onClose={() => setGift(false)}
         onRecharge={() => {

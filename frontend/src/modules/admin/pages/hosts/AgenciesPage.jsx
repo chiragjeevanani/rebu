@@ -395,7 +395,10 @@ export default function AgenciesPage() {
                 {openHosts.map(h => (
                   <div key={h.id} className="a-row between">
                     <Who src={h.avatar} name={h.name} sub={`${h.id} · Lv ${h.level}`} to={`/admin/hosts/${h.id}`} />
-                    <Status value={h.status === 'active' ? (h.online ? 'online' : 'offline') : h.status} />
+                    <span className="a-row" style={{ gap: 10 }}>
+                      <b className="a-strong" title="Lifetime earnings">{inr(h.lifetime || 0)}</b>
+                      <Status value={h.status === 'active' ? (h.online ? 'online' : 'offline') : h.status} />
+                    </span>
                   </div>
                 ))}
               </div>

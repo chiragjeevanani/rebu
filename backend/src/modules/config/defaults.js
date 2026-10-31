@@ -1,7 +1,38 @@
 // Starting values for every admin-editable setting. Kept in sync with
 // mobile/src/data/economy.js and the admin panel's seed until both read
 // GET /config from this server.
+const HOST_CATEGORIES = [
+  { key: 'iron', name: 'Iron', fromLevel: 1, maxRate: 60, commissionDiscount: 0, color: '#6B7280' },
+  { key: 'bronze', name: 'Bronze', fromLevel: 11, maxRate: 80, commissionDiscount: 0, color: '#B07A47' },
+  { key: 'silver', name: 'Silver', fromLevel: 21, maxRate: 100, commissionDiscount: 1, color: '#8A96A3' },
+  { key: 'gold', name: 'Gold', fromLevel: 31, maxRate: 150, commissionDiscount: 2, color: '#D49B00' },
+  { key: 'platinum', name: 'Platinum', fromLevel: 41, maxRate: 200, commissionDiscount: 4, color: '#3E9EAA' },
+  { key: 'diamond', name: 'Diamond', fromLevel: 46, maxRate: 300, commissionDiscount: 6, color: '#6C4DE6' },
+]
+const categoryOf = level => [...HOST_CATEGORIES].reverse().find(c => level >= c.fromLevel)
+const HOST_LEVELS = Array.from({ length: 50 }, (_, i) => {
+  const level = i + 1
+  const c = categoryOf(level)
+  return {
+    level,
+    // Gift coins received to reach this level (gentle curve: ~1k for L2, ~1.1M for L50).
+    giftCoins: level === 1 ? 0 : Math.round((500 * (level - 1) ** 1.9) / 100) * 100,
+    category: c.key,
+    maxRate: c.maxRate,
+    commissionDiscount: c.commissionDiscount,
+  }
+})
+
 export const DEFAULT_CONFIG = {
+  // Users get a frame by lifetime coins bought (all recharges, bonus included).
+  senderTiers: [
+    { key: 'none', name: 'No frame', minCoins: 0, color: '' },
+    { key: 'bronze', name: 'Bronze', minCoins: 1000, color: '#B07A47' },
+    { key: 'silver', name: 'Silver', minCoins: 5000, color: '#9AA4AE' },
+    { key: 'gold', name: 'Gold', minCoins: 20000, color: '#E0A800' },
+    { key: 'platinum', name: 'Platinum', minCoins: 60000, color: '#5DADB8' },
+    { key: 'diamond', name: 'Diamond', minCoins: 150000, color: '#6C4DE6' },
+  ],
   economy: {
     coinInr: 0.8,
     commission: { video: 40, voice: 40, chat: 50, gift: 50, ticket: 40, bonus: 0 },
@@ -12,7 +43,9 @@ export const DEFAULT_CONFIG = {
     payoutTime: '24–48 hours',
     welcomeBonusCoins: 1000,
     messageCost: 10,
-    newUserCoins: 50,
+    maxGiftQuantity: 99, // most of one gift a user can send in a single go
+    newUserCoins: 50, // bonus coins for every new account
+    minLiveBalance: 50, // coins a user must hold to enter a host's live
   },
   coinPacks: [
     { id: 'p1', coins: 100, bonus: 0, price: 99, tag: '', active: true, firstRecharge: false },
@@ -33,17 +66,18 @@ export const DEFAULT_CONFIG = {
     name,
     emoji,
     coins,
+    // Lottie overlay played over the video when the gift is sent (free LottieFiles
+    // animations, Lottie Simple License). Admins can upload their own.
+    animation: `/static/gifts/${key}.json`,
     fullScreen: coins >= 999,
     category: coins >= 999 ? 'Luxury' : coins >= 99 ? 'Popular' : 'Basic',
     active: true,
     order: i + 1,
   })),
-  hostLevels: [
-    { level: 1, minutes: 0, maxRate: 60, commissionDiscount: 0 },
-    { level: 2, minutes: 300, maxRate: 100, commissionDiscount: 0 },
-    { level: 3, minutes: 1000, maxRate: 200, commissionDiscount: 2 },
-    { level: 4, minutes: 3000, maxRate: 300, commissionDiscount: 5 },
-  ],
+  // Host levels come from lifetime gift coins received. Each level belongs to a
+  // category (Iron…Diamond) that sets the price cap and commission discount.
+  hostCategories: HOST_CATEGORIES,
+  hostLevels: HOST_LEVELS,
   rateTiers: {
     video: [30, 40, 60, 80, 100, 150, 200, 300],
     voice: [15, 20, 30, 40, 60, 80, 100, 150],
@@ -111,14 +145,14 @@ export const DEFAULT_CONFIG = {
       hostApplications: true,
       agencies: true,
     },
-    hostApply: { minAge: 18, autoApprove: false, requireSelfie: true, requireId: true, idTypes: ['Aadhaar', 'PAN', 'Passport', 'Driving licence'] },
+    hostApply: { minAge: 18, womenOnly: true, liveWomenOnly: true, autoApprove: false, requireSelfie: true, requireId: true, idTypes: ['Aadhaar', 'PAN', 'Passport', 'Driving licence'] },
     moderation: {
       autoFlagKeywords: ['whatsapp', 'paytm me', 'nude', 'number do', 'telegram'],
       blockContactSharing: true,
       maxReportsBeforeAutoSuspend: 10,
       liveRecordingForReview: true,
     },
-    limits: { maxGuestsInLive: 2, maxRoomSeats: 8, ringTimeoutSecs: 30, freeMessagesPerDay: 0 },
+    limits: { maxGuestsInLive: 2, maxRoomSeats: 8, ringTimeoutSecs: 30, freeMessagesPerDay: 0, maxCallsAtOnce: 2 },
     support: { email: 'support@rebu.app', whatsapp: '', hours: '10 AM – 10 PM IST' },
   },
 }

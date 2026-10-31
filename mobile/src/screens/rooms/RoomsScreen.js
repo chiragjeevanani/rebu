@@ -20,6 +20,7 @@ import { colors, fonts, radius, spacing } from '../../theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { listRooms } from '../../api/rooms';
 import { useApp } from '../../context/AppContext';
+import { canGoLive } from '../../utils/hosting';
 import Screen from '../../components/Screen';
 import Txt from '../../components/Txt';
 import Input from '../../components/Input';
@@ -69,7 +70,8 @@ export function RoomCard({ room, onPress }) {
 
 export default function RoomsScreen({ navigation, route }) {
   const insets = useSafeAreaInsets();
-  const { user } = useApp();
+  const { user, config } = useApp();
+  const mayCreate = canGoLive(user, config); // creating a room is for women only
   const [rooms, setRooms] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const load = useCallback(
@@ -127,14 +129,16 @@ export default function RoomsScreen({ navigation, route }) {
               iconSize={23}
               onPress={() => setSearching(s => !s)}
             />
-            <IconButton
-              icon={SquarePlus}
-              variant="plain"
-              shadowed={false}
-              size={38}
-              iconSize={23}
-              onPress={() => navigation.navigate('CreateRoom')}
-            />
+            {mayCreate ? (
+              <IconButton
+                icon={SquarePlus}
+                variant="plain"
+                shadowed={false}
+                size={38}
+                iconSize={23}
+                onPress={() => navigation.navigate('CreateRoom')}
+              />
+            ) : null}
           </>
         }
       />
@@ -172,9 +176,11 @@ export default function RoomsScreen({ navigation, route }) {
               <Txt variant="body" color={colors.textMuted} center>
                 {tab === 'Mine'
                   ? 'You haven’t created a room yet.'
-                  : 'No rooms are open right now — start one!'}
+                  : mayCreate
+                  ? 'No rooms are open right now — start one!'
+                  : 'No rooms are open right now.'}
               </Txt>
-              {tab === 'Mine' ? (
+              {tab === 'Mine' && mayCreate ? (
                 <Button
                   title="Create my room"
                   full={false}
@@ -192,13 +198,15 @@ export default function RoomsScreen({ navigation, route }) {
           />
         )}
       />
-      <Pressable
-        style={[styles.create, { bottom: insets.bottom + 16 }]}
-        onPress={() => navigation.navigate('CreateRoom')}
-      >
-        <Plus size={20} color={colors.white} strokeWidth={2.6} />
-        <Txt style={styles.createText}>Create room</Txt>
-      </Pressable>
+      {mayCreate ? (
+        <Pressable
+          style={[styles.create, { bottom: insets.bottom + 16 }]}
+          onPress={() => navigation.navigate('CreateRoom')}
+        >
+          <Plus size={20} color={colors.white} strokeWidth={2.6} />
+          <Txt style={styles.createText}>Create room</Txt>
+        </Pressable>
+      ) : null}
     </Screen>
   );
 }

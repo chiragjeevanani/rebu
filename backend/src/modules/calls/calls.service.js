@@ -8,9 +8,9 @@
 import mongoose from 'mongoose'
 import { User } from '../users/user.model.js'
 import { Call, ACTIVE } from './call.model.js'
-import { chargeUserPayHost, levelForMinutes, withTxn } from '../wallet/economy.service.js'
+import { chargeUserPayHost, withTxn } from '../wallet/economy.service.js'
 import { getConfig } from '../config/config.service.js'
-import { channelName, rtcToken } from '../agora/agora.service.js'
+import { channelName, rtcToken, uidFor } from '../agora/agora.service.js'
 import { toUser, isOnline } from '../../core/realtime.js'
 import { notify } from '../notifications/notifications.js'
 import { ApiError, badRequest, conflict, forbidden, insufficientCoins, notFound } from '../../core/errors.js'
@@ -63,6 +63,9 @@ export function shapeCall(call, viewerId) {
     status: c.status,
     rate: c.rate,
     channel: c.channel,
+    // Callers play only the host's stream (other callers may share the channel).
+    hostUid: uidFor(c.host),
+    callerUid: uidFor(c.caller),
     createdAt: c.createdAt,
     connectedAt: c.connectedAt || null,
     endedAt: c.endedAt || null,
@@ -75,7 +78,15 @@ export function shapeCall(call, viewerId) {
 
 const tokenFor = (call, userId) => rtcToken({ channel: call.channel, userId, role: 'publisher' })
 
-const freeHost = hostId => User.updateOne({ _id: hostId }, { $set: { 'host.busy': false } })
+// A host can be on several calls at once (settings.limits.maxCallsAtOnce).
+// host.calls counts their ringing + connected calls; host.busy means "full".
+const maxCalls = () => Math.max(1, getConfig().settings.limits.maxCallsAtOnce || 1)
+const callsNow = { $ifNull: ['$host.calls', 0] }
+const freeHost = hostId =>
+  User.updateOne({ _id: hostId }, [
+    { $set: { 'host.calls': { $max: [0, { $subtract: [callsNow, 1] }] } } },
+    { $set: { 'host.busy': { $gte: ['$host.calls', maxCalls()] } } },
+  ], { updatePipeline: true })
 
 // ---- start ----
 
@@ -89,7 +100,10 @@ export async function startCall(caller, { hostId, type, random = false }) {
     throw forbidden('You can’t call this host.')
   }
   if (!host.host.online) throw conflict('This host is offline right now.', 'host_offline')
-  if (host.host.busy) throw conflict('This host is on another call. Try again in a bit.', 'host_busy')
+  if ((host.host.calls || 0) >= maxCalls()) throw conflict('This host is on another call. Try again in a bit.', 'host_busy')
+  // A second caller joins the host's current call channel; same call type only.
+  const current = await Call.findOne({ host: host._id, status: { $in: ACTIVE } }, { channel: 1, type: 1 }).sort({ createdAt: 1 })
+  if (current && current.type !== type) throw conflict(`This host is on a ${current.type} call right now. Try again in a bit.`, 'host_busy')
   const rate = host.host.rates?.[type]
   if (!(rate > 0)) throw badRequest(`This host doesn’t take ${type} calls.`)
   if (caller.coins < rate) throw insufficientCoins(rate, caller.coins)
@@ -97,17 +111,21 @@ export async function startCall(caller, { hostId, type, random = false }) {
     throw conflict('You’re already on a call.', 'already_in_call')
   }
 
-  // Claim the host; only one caller can flip busy false → true.
+  // Claim a call slot atomically; parallel callers can't overfill the host.
   const claim = await User.updateOne(
-    { _id: host._id, status: 'active', 'host.approved': true, 'host.status': 'active', 'host.online': true, 'host.busy': false },
-    { $set: { 'host.busy': true } },
+    { _id: host._id, status: 'active', 'host.approved': true, 'host.status': 'active', 'host.online': true, $expr: { $lt: [callsNow, maxCalls()] } },
+    [
+      { $set: { 'host.calls': { $add: [callsNow, 1] } } },
+      { $set: { 'host.busy': { $gte: ['$host.calls', maxCalls()] } } },
+    ],
+    { updatePipeline: true },
   )
   if (!claim.modifiedCount) throw conflict('This host is on another call. Try again in a bit.', 'host_busy')
 
   let call
   try {
     const _id = new mongoose.Types.ObjectId()
-    call = await Call.create({ _id, caller: caller._id, host: host._id, type, random, rate, channel: channelName('call', _id) })
+    call = await Call.create({ _id, caller: caller._id, host: host._id, type, random, rate, channel: current?.channel || channelName('call', _id) })
   } catch (e) {
     await freeHost(host._id)
     throw e
@@ -117,7 +135,8 @@ export async function startCall(caller, { hostId, type, random = false }) {
     endCall(call._id, { reason: 'timeout' }).catch(e => console.error('[calls] ring timeout', e))
   }, ringMs()))
 
-  toUser(host._id, 'call:incoming', { call: shapeCall(call, host._id), caller: caller.toPublic() })
+  // `joining`: the host is already on a call; accepting adds this caller to it.
+  toUser(host._id, 'call:incoming', { call: shapeCall(call, host._id), caller: caller.toPublic(), joining: !!current })
   notify(host._id, {
     kind: 'call',
     title: `${caller.name || 'Someone'} is calling`,
@@ -306,15 +325,8 @@ async function finishRinging(c) {
 
 async function finishConnected(c) {
   clearTimers(c._id)
-  const h = await User.findOneAndUpdate(
-    { _id: c.host },
-    { $set: { 'host.busy': false }, $inc: { 'host.callMinutes': c.minutes } },
-    { returnDocument: 'after', projection: { host: 1 } },
-  )
-  if (h?.host) {
-    const level = levelForMinutes(h.host.callMinutes)
-    if (level !== h.host.level) await User.updateOne({ _id: c.host }, { $set: { 'host.level': level } })
-  }
+  await User.updateOne({ _id: c.host }, { $inc: { 'host.callMinutes': c.minutes } })
+  await freeHost(c.host)
   const payer = await User.findById(c.caller, { coins: 1 })
   const base = { callId: String(c._id), status: c.status, reason: c.endReason, duration: c.duration, minutes: c.minutes }
   toUser(c.caller, 'call:ended', { ...base, charged: c.chargedCoins, balance: payer?.coins ?? null, call: shapeCall(c, c.caller) })
@@ -392,6 +404,8 @@ onStartup(async () => {
   const stale = await Call.find({ status: { $in: ACTIVE } }, { _id: 1 })
   for (const c of stale) await endCall(c._id, { reason: 'server_restart' })
   if (stale.length) console.log(`[calls] ended ${stale.length} call(s) left over from the last run`)
+  // No call is active now, so every host's call slots are free.
+  await User.updateMany({ 'host.approved': true, $or: [{ 'host.calls': { $gt: 0 } }, { 'host.busy': true }] }, { $set: { 'host.calls': 0, 'host.busy': false } })
 })
 
 onShutdown(() => {

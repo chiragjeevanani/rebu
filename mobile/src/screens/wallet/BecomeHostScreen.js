@@ -15,6 +15,7 @@ import Header from '../../components/Header';
 import Txt from '../../components/Txt';
 import Button from '../../components/Button';
 import { Card } from '../../components/ListRow';
+import { canApplyToHost, womenOnly } from '../../utils/hosting';
 
 const BENEFITS = [
   {
@@ -55,8 +56,10 @@ const HOW = [
 ];
 
 export default function BecomeHostScreen({ navigation }) {
-  const { hostApp } = useApp();
+  const { hostApp, user, config } = useApp();
   const status = hostApp.status;
+  // Existing hosts and earlier applications keep their way in.
+  const blocked = status === 'none' && !canApplyToHost(user, config);
 
   return (
     <Screen
@@ -64,7 +67,13 @@ export default function BecomeHostScreen({ navigation }) {
       edges={['top', 'bottom']}
       footer={
         <View style={{ padding: spacing.md }}>
+          {blocked ? (
+            <Txt variant="small" style={styles.blocked}>
+              Hosting on REBU is open to women only.
+            </Txt>
+          ) : null}
           <Button
+            disabled={blocked}
             title={
               status === 'approved'
                 ? 'Open Host Center'
@@ -139,7 +148,8 @@ export default function BecomeHostScreen({ navigation }) {
           <View style={{ flex: 1 }}>
             <Txt variant="label">Requirements</Txt>
             <Txt variant="small">
-              18+, verified profile photo, and government ID for withdrawals.
+              {womenOnly(config) ? 'Women only · ' : ''}18+, verified profile
+              photo, and government ID for withdrawals.
             </Txt>
           </View>
         </Card>
@@ -150,6 +160,7 @@ export default function BecomeHostScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   hero: { borderRadius: radius.xl, padding: 22 },
+  blocked: { textAlign: 'center', marginBottom: 10 },
   kicker: {
     fontFamily: fonts.bold,
     fontSize: 11,

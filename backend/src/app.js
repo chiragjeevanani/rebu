@@ -1,3 +1,4 @@
+import path from 'node:path'
 import express from 'express'
 import helmet from 'helmet'
 import cors from 'cors'
@@ -49,6 +50,11 @@ export function createApp() {
     res.set('cross-origin-resource-policy', 'cross-origin')
     next()
   }, express.static(UPLOAD_DIR, { maxAge: '7d' }))
+  // Bundled assets (gift animations).
+  app.use('/static', (req, res, next) => {
+    res.set('cross-origin-resource-policy', 'cross-origin')
+    next()
+  }, express.static(path.resolve('public'), { maxAge: '1d' }))
   app.get('/health', (req, res) => res.json({ ok: true, agora: agoraConfigured(), razorpay: razorpayEnabled() }))
   if (!env.isProd) app.use('/dev', devCheckout, hostSim, viewerSim)
 

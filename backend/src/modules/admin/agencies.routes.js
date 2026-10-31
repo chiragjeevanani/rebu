@@ -8,7 +8,7 @@ import { audit } from '../audit/audit.model.js'
 import { User } from '../users/user.model.js'
 import { Agency } from '../hosts/hosts.models.js'
 import { Earning } from '../earnings/earnings.models.js'
-import { round2, rx, sorting, withId } from './admin.util.js'
+import { balancesFor, round2, rx, sorting, withId } from './admin.util.js'
 
 export const agenciesAdmin = Router()
 agenciesAdmin.use(requireAdmin(Admin, 'agencies'))
@@ -74,9 +74,10 @@ agenciesAdmin.get(
     if (!a) throw notFound('Agency')
     const row = await statsFor([a._id])
     const hosts = await User.find({ 'host.approved': true, 'host.agencyId': a._id }, { name: 1, photos: 1, host: 1 }).limit(200).lean()
+    const bals = await balancesFor(hosts.map(u => u._id))
     res.json({
       agency: row(a),
-      hosts: hosts.map(u => ({ id: String(u._id), name: u.host.displayName || u.name, avatar: u.host.photos?.[0] || u.photos?.[0] || null, level: u.host.levelOverride || u.host.level, status: u.host.status, online: u.host.online })),
+      hosts: hosts.map(u => ({ id: String(u._id), name: u.host.displayName || u.name, avatar: u.host.photos?.[0] || u.photos?.[0] || null, level: u.host.levelOverride || u.host.level, status: u.host.status, online: u.host.online, lifetime: bals.get(String(u._id))?.lifetime || 0 })),
     })
   }),
 )

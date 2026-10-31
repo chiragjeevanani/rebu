@@ -1,14 +1,20 @@
-import { useMemo, useState } from 'react'
-import { Gift, Info, Pencil, Plus, Trash2 } from 'lucide-react'
+import { useMemo, useRef, useState } from 'react'
+import { Gift, Pencil, Plus, RotateCcw, Trash2, Upload } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
-import { errorText } from '../../api/client'
+import { api, errorText } from '../../api/client'
+import { useApi } from '../../hooks/useApi'
 import { Badge, Button, Card, Confirm, Empty, Field, Input, Modal, PageHeader, Seg, Select, Setting, Switch } from '../../components/ui'
 import { BarList } from '../../components/charts'
+import LottiePreview from '../../components/LottiePreview'
 import { compact, inr, num } from '../../utils/format'
 
 const CATEGORIES = ['Basic', 'Popular', 'Luxury']
 const FULL_SCREEN_AT = 999
+// Gifts that ship with a bundled animation at /static/gifts/<key>.json.
+const BUNDLED = ['rose', 'heart', 'kiss', 'chocolate', 'teddy', 'cake', 'ring', 'crown', 'car', 'yacht', 'castle', 'rocket']
+const bundledFor = key => (BUNDLED.includes(key) ? `/static/gifts/${key}.json` : '')
+const MAX_ANIMATION_BYTES = 1000 * 1000
 const SORTS = [
   { value: 'order', label: 'App order' },
   { value: 'asc', label: 'Price: low to high' },
@@ -28,19 +34,65 @@ const suggestCategory = coins => (coins >= FULL_SCREEN_AT ? 'Luxury' : coins >= 
 function GiftModal({ gift, gifts, coinInr, onClose, onSave }) {
   const [f, setF] = useState(() =>
     gift
-      ? { emoji: gift.emoji, name: gift.name, key: gift.key, coins: String(gift.coins), category: gift.category, fullScreen: gift.fullScreen, active: gift.active }
-      : { emoji: '', name: '', key: '', coins: '', category: 'Basic', fullScreen: false, active: true },
+      ? {
+          emoji: gift.emoji,
+          name: gift.name,
+          key: gift.key,
+          coins: String(gift.coins),
+          category: gift.category,
+          fullScreen: gift.fullScreen,
+          active: gift.active,
+          animation: gift.animation || '',
+        }
+      : { emoji: '', name: '', key: '', coins: '', category: 'Basic', fullScreen: false, active: true, animation: '' },
   )
   // Until the admin touches these, they follow the name / price.
-  const [touched, setTouched] = useState({ key: !!gift, fullScreen: !!gift, category: !!gift })
+  const [touched, setTouched] = useState({ key: !!gift, fullScreen: !!gift, category: !!gift, animation: !!gift })
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState(null)
+  const fileRef = useRef(null)
+  const toast = useToast()
   const coins = Number(f.coins)
+  const bundled = bundledFor(f.key)
 
   const set = (k, v) => {
     setTouched(t => ({ ...t, [k]: true }))
     setF(x => ({ ...x, [k]: v }))
   }
+  // New gifts take their key from the name, and the bundled animation if one matches.
   const setName = v =>
-    setF(x => ({ ...x, name: v, key: touched.key ? x.key : slug(v) }))
+    setF(x => {
+      const key = touched.key ? x.key : slug(v)
+      return { ...x, name: v, key, animation: touched.animation ? x.animation : bundledFor(key) }
+    })
+
+  const setKey = key => {
+    setTouched(t => ({ ...t, key: true }))
+    setF(x => ({ ...x, key, animation: touched.animation ? x.animation : bundledFor(key) }))
+  }
+
+  // Upload the Lottie JSON itself; the server checks it and returns its URL.
+  const upload = async file => {
+    setUploadError(null)
+    if (!file) return
+    if (file.size > MAX_ANIMATION_BYTES) return setUploadError('That file is over 1 MB. Export a smaller animation.')
+    let json
+    try {
+      json = JSON.parse(await file.text())
+    } catch {
+      return setUploadError('That file isn’t valid JSON. Pick the Lottie .json file.')
+    }
+    setUploading(true)
+    try {
+      const { url } = await api.post('/admin/uploads/animation', json)
+      set('animation', url)
+      toast('Animation uploaded · save the gift to use it')
+    } catch (e) {
+      setUploadError(errorText(e))
+    } finally {
+      setUploading(false)
+    }
+  }
   const setCoins = v => {
     const n = Number(v)
     setF(x => ({
@@ -61,7 +113,6 @@ function GiftModal({ gift, gifts, coinInr, onClose, onSave }) {
   else if (gifts.some(g => g.id !== gift?.id && g.key === f.key)) err.key = 'Another gift already uses this key'
   if (!f.coins.trim() || !Number.isInteger(coins) || coins <= 0) err.coins = 'Whole number of coins, more than 0'
   const ok = Object.keys(err).length === 0
-  const newKey = !gift || gift.key !== f.key
 
   return (
     <Modal
@@ -73,9 +124,18 @@ function GiftModal({ gift, gifts, coinInr, onClose, onSave }) {
           <Button onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
-            disabled={!ok}
+            disabled={!ok || uploading}
             onClick={() =>
-              onSave({ emoji: f.emoji.trim(), name: f.name.trim(), key: f.key, coins, category: f.category, fullScreen: f.fullScreen, active: f.active })
+              onSave({
+                emoji: f.emoji.trim(),
+                name: f.name.trim(),
+                key: f.key,
+                coins,
+                category: f.category,
+                fullScreen: f.fullScreen,
+                active: f.active,
+                animation: f.animation,
+              })
             }
           >
             {gift ? 'Save gift' : 'Create gift'}
@@ -93,7 +153,7 @@ function GiftModal({ gift, gifts, coinInr, onClose, onSave }) {
           </Field>
         </div>
         <Field label="Key" hint="Stable ID the app uses for the gift and its animation. Lowercase, unique." error={err.key}>
-          <Input className="a-mono" value={f.key} onChange={e => set('key', e.target.value.toLowerCase().replace(/[^a-z0-9_]+/g, '_'))} placeholder="sports_car" />
+          <Input className="a-mono" value={f.key} onChange={e => setKey(e.target.value.toLowerCase().replace(/[^a-z0-9_]+/g, '_'))} placeholder="sports_car" />
         </Field>
         <div className="a-grid c2">
           <Field label="Price" error={err.coins} hint={!err.coins && f.coins ? `≈ ${inr(coins * coinInr)} gross per send` : null}>
@@ -103,22 +163,66 @@ function GiftModal({ gift, gifts, coinInr, onClose, onSave }) {
             <Select value={f.category} onChange={e => set('category', e.target.value)} options={CATEGORIES} />
           </Field>
         </div>
+        <div className="a-field">
+          <span className="a-label">Animation</span>
+          <div className="a-row" style={{ alignItems: 'flex-start', gap: 14 }}>
+            <span
+              style={{
+                width: 112,
+                height: 112,
+                flexShrink: 0,
+                display: 'grid',
+                placeItems: 'center',
+                borderRadius: 'var(--radius)',
+                background: 'var(--surface-2)',
+              }}
+            >
+              <LottiePreview src={f.animation} size={100} fallback={<span style={{ fontSize: 48 }}>{f.emoji || '🎁'}</span>} />
+            </span>
+            <div className="a-stack" style={{ gap: 8, minWidth: 0, flex: 1 }}>
+              <span className="a-small a-muted a-mono" style={{ wordBreak: 'break-all' }}>
+                {f.animation || 'No animation: the app pops up the emoji instead.'}
+              </span>
+              <span className="a-row wrap" style={{ gap: 6 }}>
+                <Button size="sm" icon={Upload} disabled={uploading} onClick={() => fileRef.current?.click()}>
+                  {uploading ? 'Uploading…' : 'Upload Lottie JSON'}
+                </Button>
+                {bundled && f.animation !== bundled ? (
+                  <Button size="sm" variant="ghost" icon={RotateCcw} onClick={() => set('animation', bundled)}>
+                    Use default
+                  </Button>
+                ) : null}
+                {f.animation ? (
+                  <Button size="sm" variant="ghost" icon={Trash2} onClick={() => set('animation', '')}>
+                    Remove
+                  </Button>
+                ) : null}
+              </span>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".json,application/json"
+                style={{ display: 'none' }}
+                onChange={e => {
+                  upload(e.target.files?.[0])
+                  e.target.value = ''
+                }}
+              />
+              {uploadError ? (
+                <span className="a-error">{uploadError}</span>
+              ) : (
+                <span className="a-hint">A Lottie .json file (as exported from LottieFiles or After Effects), up to 1 MB.</span>
+              )}
+            </div>
+          </div>
+        </div>
         <div>
           <Setting
-            title="Full-screen animation"
-            description={`Plays a full-screen scene when sent. On by default for gifts of ${num(FULL_SCREEN_AT)}+ coins.`}
+            title="Large animation"
+            description={`Every gift plays its animation when sent. Large ones play bigger, across the screen. On by default for gifts of ${num(FULL_SCREEN_AT)}+ coins.`}
           >
             <Switch checked={f.fullScreen} onChange={v => set('fullScreen', v)} />
           </Setting>
-          {f.fullScreen && newKey && f.key ? (
-            <div className="a-row a-small a-warning" style={{ alignItems: 'flex-start', gap: 6, paddingBottom: 10 }}>
-              <Info size={15} style={{ flexShrink: 0, marginTop: 1 }} />
-              <span>
-                The animated scene for <span className="a-mono">{f.key}</span> must already exist in the app build. If it doesn’t, users see the standard
-                gift animation instead.
-              </span>
-            </div>
-          ) : null}
           <Setting title="Active" description="Inactive gifts are hidden from the gift panel.">
             <Switch checked={f.active} onChange={v => set('active', v)} />
           </Setting>
@@ -135,13 +239,14 @@ const diff = (a, b) => {
   if (a.key !== b.key) out.push(`key ${a.key} → ${b.key}`)
   if (a.coins !== b.coins) out.push(`price ${num(a.coins)} → ${num(b.coins)} coins`)
   if (a.category !== b.category) out.push(`category ${a.category} → ${b.category}`)
-  if (a.fullScreen !== b.fullScreen) out.push(b.fullScreen ? 'full-screen on' : 'full-screen off')
+  if (a.fullScreen !== b.fullScreen) out.push(b.fullScreen ? 'large animation on' : 'large animation off')
+  if ((a.animation || '') !== (b.animation || '')) out.push('animation changed')
   if (a.active !== b.active) out.push(b.active ? 'activated' : 'deactivated')
   return out
 }
 
 // Client-only fields never go to the API (the gifts schema is key-based).
-const GIFT_FIELDS = ['key', 'name', 'emoji', 'image', 'coins', 'fullScreen', 'category', 'active', 'order']
+const GIFT_FIELDS = ['key', 'name', 'emoji', 'image', 'animation', 'coins', 'fullScreen', 'category', 'active', 'order']
 const toApi = list => list.map(g => Object.fromEntries(GIFT_FIELDS.filter(k => g[k] !== undefined).map(k => [k, g[k]])))
 
 export default function GiftsPage() {
@@ -151,10 +256,13 @@ export default function GiftsPage() {
   const [sort, setSort] = useState('order')
   const [editing, setEditing] = useState(null) // gift | 'new'
   const [deleting, setDeleting] = useState(null)
-  // Server gifts are keyed by `key`; the page uses `id`.
-  // TODO(api): sends per gift (sent30d) — want GET /admin/finance/gifts?days=30 →
-  // { items: [{ key, sent, coins, gross }] }. Until then the 30-day stats read 0.
-  const gifts = useMemo(() => db.config.gifts.map(g => ({ ...g, id: g.key })), [db.config.gifts])
+  // Server gifts are keyed by `key`; the page uses `id`. 30-day sends and ₹ gross
+  // come from GET /admin/finance/gifts (sent30d/gross30d are display-only, stripped on save).
+  const statsRes = useApi('/admin/finance/gifts', { days: 30 })
+  const gifts = useMemo(() => {
+    const stats = new Map((statsRes.data?.items || []).map(x => [x.key, x]))
+    return db.config.gifts.map(g => ({ ...g, id: g.key, sent30d: stats.get(g.key)?.sent || 0, gross30d: stats.get(g.key)?.gross || 0 }))
+  }, [db.config.gifts, statsRes.data])
   const coinInr = db.config.economy.coinInr
   const giftCut = db.config.economy.commission.gift
 
@@ -181,13 +289,13 @@ export default function GiftsPage() {
   }, [gifts, cat, sort])
 
   const summary = useMemo(() => {
-    const gross = gifts.reduce((n, g) => n + (g.sent30d || 0) * g.coins * coinInr, 0)
+    const gross = gifts.reduce((n, g) => n + g.gross30d, 0)
     const top = [...gifts]
       .sort((a, b) => (b.sent30d || 0) - (a.sent30d || 0))
       .slice(0, 6)
       .map(g => ({ label: `${g.emoji} ${g.name}`, value: g.sent30d || 0 }))
     return { gross, rebu: (gross * giftCut) / 100, sent: gifts.reduce((n, g) => n + (g.sent30d || 0), 0), top }
-  }, [gifts, coinInr, giftCut])
+  }, [gifts, giftCut])
 
   const counts = Object.fromEntries(CATEGORIES.map(c => [c, gifts.filter(g => g.category === c).length]))
 
@@ -214,7 +322,7 @@ export default function GiftsPage() {
     <>
       <PageHeader
         title="Gifts"
-        subtitle={`${gifts.length} gifts · ${gifts.filter(g => g.active).length} active · ${gifts.filter(g => g.fullScreen).length} with full-screen animation`}
+        subtitle={`${gifts.length} gifts · ${gifts.filter(g => g.active).length} active · ${gifts.filter(g => g.fullScreen).length} with large animation · ${gifts.filter(g => !g.animation).length} without animation`}
         crumbs={[{ label: 'Monetization' }, { label: 'Gifts' }]}
         actions={
           <Button variant="primary" icon={Plus} onClick={() => setEditing('new')}>
@@ -246,12 +354,12 @@ export default function GiftsPage() {
         </Card>
 
         <div className="a-stack">
-          <Card title="Gift revenue · 30 days" subtitle={`Sends × price × ${inr(coinInr)} per coin`}>
+          <Card title="Gift revenue · 30 days" subtitle={`Gross of gifts sent, settled at ${inr(coinInr)} per coin`}>
             <div className="a-stat-value" style={{ marginTop: 0 }}>
               {inr(Math.round(summary.gross))}
             </div>
             <div className="a-small a-muted" style={{ marginTop: 4 }}>
-              Estimated gross from {num(summary.sent)} gifts sent · REBU keeps {giftCut}% ≈ <b className="a-strong">{inr(Math.round(summary.rebu))}</b>
+              Gross from {num(summary.sent)} gifts sent · REBU keeps {giftCut}% ≈ <b className="a-strong">{inr(Math.round(summary.rebu))}</b>
             </div>
           </Card>
           <Card title="Most-sent gifts" subtitle="Last 30 days">
@@ -290,9 +398,15 @@ function GiftCard({ gift: g, onToggle, onEdit, onDelete }) {
       }}
     >
       <div className="a-row between" style={{ alignItems: 'flex-start' }}>
-        <span style={{ fontSize: 44, lineHeight: 1 }} aria-hidden>
-          {g.emoji}
-        </span>
+        <LottiePreview
+          src={g.animation}
+          size={64}
+          fallback={
+            <span style={{ fontSize: 44, lineHeight: 1 }} aria-hidden>
+              {g.emoji}
+            </span>
+          }
+        />
         <Switch checked={g.active} onChange={onToggle} />
       </div>
       <div>
@@ -308,7 +422,8 @@ function GiftCard({ gift: g, onToggle, onEdit, onDelete }) {
       </div>
       <div className="a-row wrap" style={{ gap: 6 }}>
         <Badge tone={g.category === 'Luxury' ? 'violet' : g.category === 'Popular' ? 'info' : 'neutral'}>{g.category}</Badge>
-        {g.fullScreen ? <Badge tone="brand">Full-screen animation</Badge> : null}
+        {g.fullScreen ? <Badge tone="brand">Large animation</Badge> : null}
+        {!g.animation ? <Badge tone="warning">No animation</Badge> : g.animation !== bundledFor(g.key) ? <Badge tone="info">Custom animation</Badge> : null}
       </div>
       <div className="a-row between" style={{ borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 'auto' }}>
         <span className="a-small a-muted">

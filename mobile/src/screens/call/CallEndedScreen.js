@@ -25,6 +25,7 @@ import { CoinIcon } from '../../components/CoinPill';
 import { useSecureScreen } from '../../utils/secure';
 import { post } from '../../api/client';
 import { inr } from '../../data/economy';
+import { useApp } from '../../context/AppContext';
 
 export default function CallEndedScreen({ navigation, route }) {
   useSecureScreen();
@@ -39,6 +40,8 @@ export default function CallEndedScreen({ navigation, route }) {
     blocked: blockedOnCall,
   } = route.params;
   const insets = useSafeAreaInsets();
+  const { following, toggleFollow } = useApp();
+  const followsHost = following.includes(user.id);
   const [rating, setRating] = useState(0);
   const [blocked, setBlocked] = useState(!!blockedOnCall);
   // Callers rate the host once; the server keeps the host's running average.
@@ -202,12 +205,15 @@ export default function CallEndedScreen({ navigation, route }) {
               onPress={() => navigation.replace('RandomCall', { video: true })}
               style={styles.cta}
             />
-          ) : incoming ? null : (
+          ) : incoming || followsHost ? null : (
             <Button
               title={`Follow ${user.name}`}
               icon={UserPlus}
               variant="light"
-              onPress={() => navigation.goBack()}
+              onPress={() => {
+                toggleFollow(user.id);
+                navigation.goBack();
+              }}
               style={styles.cta}
             />
           )}

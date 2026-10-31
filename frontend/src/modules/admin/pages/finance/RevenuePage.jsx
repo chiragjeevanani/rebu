@@ -18,23 +18,19 @@ const SOURCES = [
 ]
 
 const packLabel = p => `${num(p.coins)}${p.bonus ? ` + ${num(p.bonus)}` : ''} coins · ${inr(p.price)}`
-const sumCount = (totals, keys) => keys.reduce((n, k) => n + (totals?.[k]?.count || 0), 0)
 
 export default function RevenuePage() {
   const [range, setRange] = useState(7)
   const res = useApi('/admin/finance/revenue', { days: range })
-  // Payment counts by status for the success rate; successful payments for paying users.
-  const tx = useApi('/admin/finance/transactions', { days: range, limit: 1 })
-  const paidTx = useApi('/admin/finance/transactions', { days: range, status: 'success', limit: 100 })
 
   return (
     <Pending res={res}>
-      {r => <Body r={r} range={range} setRange={setRange} totals={tx.data?.totals} paid={paidTx.data} />}
+      {r => <Body r={r} range={range} setRange={setRange} />}
     </Pending>
   )
 }
 
-function Body({ r, range, setRange, totals, paid }) {
+function Body({ r, range, setRange }) {
   const { db } = useStore()
   const { economy, coinPacks } = db.config
   const cur = useMemo(() => withDayLabels(r.byDay), [r.byDay])
@@ -49,15 +45,6 @@ function Body({ r, range, setRange, totals, paid }) {
     take: r.takeRate,
   }
 
-  // Paying users / ARPPU from successful payments in the window.
-  // TODO(api): exact distinct paying-user count when there are more than 100 payments —
-  // want GET /admin/finance/revenue → { payingUsers, arppu, successRate } alongside the rest.
-  const paying = paid ? new Set(paid.items.map(t => t.userId)).size : 0
-  const payingExact = paid ? paid.total <= paid.items.length : true
-  const arppu = paying ? paid.items.reduce((n, t) => n + t.amount, 0) / paying : 0
-  const captured = sumCount(totals, ['success', 'refunded'])
-  const attempts = captured + sumCount(totals, ['failed'])
-  const successRate = attempts ? (captured / attempts) * 100 : 0
 
   const byPack = useMemo(() => {
     const packs = Object.fromEntries(coinPacks.map(p => [p.id, p]))
@@ -113,9 +100,9 @@ function Body({ r, range, setRange, totals, paid }) {
       </div>
 
       <div className="a-grid c4">
-        <Stat label="Paying users" value={`${num(paying)}${payingExact ? '' : '+'}`} sub="with a successful payment" icon={UsersRound} />
-        <Stat label="ARPPU" value={inr(Math.round(arppu))} sub={payingExact ? 'revenue per paying user' : 'from the latest 100 payments'} icon={IndianRupee} />
-        <Stat label="Payment success rate" value={pct(successRate, 1)} sub={`${num(attempts)} completed attempts`} icon={CircleCheck} />
+        <Stat label="Paying users" value={num(r.payingUsers || 0)} sub="with a successful payment" icon={UsersRound} />
+        <Stat label="ARPPU" value={inr(Math.round(r.arppu || 0))} sub="revenue per paying user" icon={IndianRupee} />
+        <Stat label="Payment success rate" value={r.successRate == null ? '—' : pct(r.successRate, 1)} sub={r.successRate == null ? 'no completed attempts yet' : 'of completed payment attempts'} icon={CircleCheck} />
         <Stat label="Refunds" value={inr(r.refunds.amount)} sub={`${num(r.refunds.count)} payment${r.refunds.count === 1 ? '' : 's'} refunded`} icon={RotateCcw} />
       </div>
 

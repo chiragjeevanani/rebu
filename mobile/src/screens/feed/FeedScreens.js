@@ -12,6 +12,7 @@ import { colors, fonts, spacing } from '../../theme';
 import { useHosts } from '../../api/hosts';
 import { listRooms } from '../../api/rooms';
 import { useApp } from '../../context/AppContext';
+import { canGoLive } from '../../utils/hosting';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
 import Txt from '../../components/Txt';
@@ -111,7 +112,6 @@ export function FollowingScreen({ navigation }) {
         navigation={navigation}
         header={
           <>
-            <QuickActions />
             {followed.length ? (
               <>
                 <Txt style={styles.heading}>Hosts you follow</Txt>
@@ -152,6 +152,8 @@ export function FollowingScreen({ navigation }) {
 
 /* ---------- Explore ---------- */
 export function ExploreScreen({ navigation }) {
+  const { user: me, config } = useApp();
+  const mayCreateRoom = canGoLive(me, config);
   const hosts = useHosts();
   const [rooms, setRooms] = useState([]);
   useFocusEffect(
@@ -190,7 +192,6 @@ export function ExploreScreen({ navigation }) {
         contentContainerStyle={styles.explore}
         ListHeaderComponent={
           <>
-            <QuickActions />
             <Section
               title="Nearby"
               onMore={() => navigation.navigate('HostList', { list: 'nearby' })}
@@ -204,10 +205,13 @@ export function ExploreScreen({ navigation }) {
               {rooms.length ? null : (
                 <Pressable
                   style={styles.roomCell}
+                  disabled={!mayCreateRoom}
                   onPress={() => navigation.navigate('CreateRoom')}
                 >
                   <Txt variant="small" color={colors.textMuted}>
-                    No rooms open yet — tap to start one.
+                    {mayCreateRoom
+                      ? 'No rooms open yet — tap to start one.'
+                      : 'No rooms open right now.'}
                   </Txt>
                 </Pressable>
               )}

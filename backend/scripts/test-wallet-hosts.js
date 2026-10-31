@@ -148,6 +148,14 @@ ok(r.status === 400, 'unknown id type → 400')
 r = await call('POST', '/host/application', A, { ...good, photos: [] })
 ok(r.status === 400, 'no photos → 400')
 
+// Hosting is women-only by default: the form's gender and the profile must both be Female.
+r = await call('POST', '/host/application', A, { ...good, gender: 'Male' })
+ok(r.status === 403 && r.body.error?.code === 'women_only', 'male applicant → 403 women_only', r.body)
+await User.updateOne({ phone: APPLICANT }, { $set: { gender: 'Male' } })
+r = await call('POST', '/host/application', A, good)
+ok(r.status === 403 && r.body.error?.code === 'women_only', 'profile says male → 403 even if the form says Female', r.body)
+await User.updateOne({ phone: APPLICANT }, { $set: { gender: null } })
+
 // Flags: contact in bio, suspended agency, borderline age.
 const borderline = new Date(Date.now() - 18.5 * 365.25 * 864e5).toISOString().slice(0, 10)
 r = await call('POST', '/host/application', A, { ...good, bio: 'msg me on whatsapp 98765 43210', agencyCode: 'BADCO', dob: borderline })
@@ -181,15 +189,19 @@ ok(r.status === 409, 'already a host → 409')
 r = await call('GET', '/host/me', A)
 ok(r.status === 200 && r.body.level === 1 && r.body.agency?.code === 'STAR1048' && r.body.host.displayName === 'Kavya Sharma', 'GET /host/me', r.body)
 ok(r.body.today.bySource.bonus === 800 && r.body.balance.available === 800, `welcome bonus 1000 coins = ₹800, not shared with the agency (${r.body.balance.available})`, r.body)
-ok(r.body.next?.level === 2 && r.body.levels.length === 4, 'level ladder + next')
+ok(r.body.next?.level === 2 && r.body.next.giftCoins > 0 && r.body.levels.length >= 10 && r.body.category?.key === 'iron', 'gift-level ladder + next + category', { next: r.body.next, category: r.body.category })
 r = await call('PATCH', '/host/me', A, { rates: { video: 100 } })
 ok(r.status === 400, 'PATCH rates above cap → 400')
 r = await call('PATCH', '/host/me', A, { rates: { video: 40, voice: 15 }, online: true, bio: 'Hi there', languages: ['Tamil'] })
 ok(r.status === 200 && r.body.host.rates.video === 40 && r.body.host.online && r.body.host.languages[0] === 'Tamil', 'PATCH /host/me')
-// Level-3 seed host may set 200.
+// Price caps come from the category: Iron (levels 1–10) caps at 60, Gold (31+) at 150.
 const riya = await login('9000000002')
 r = await call('PATCH', '/host/me', riya.token, { rates: { video: 200 } })
-ok(r.status === 200 && r.body.host.rates.video === 200, 'level-3 host can price at 200')
+ok(r.status === 400, 'Iron host can’t price at 200')
+await User.updateOne({ phone: '9000000002' }, { $set: { 'host.levelOverride': 31 } })
+r = await call('PATCH', '/host/me', riya.token, { rates: { video: 150 } })
+ok(r.status === 200 && r.body.host.rates.video === 150, 'Gold host can price at 150', r.body)
+await User.updateOne({ phone: '9000000002' }, { $set: { 'host.levelOverride': null } })
 r = await call('PATCH', '/host/me', riya.token, { rates: { video: 40 } })
 
 // Some paid activity: demo user pays Kavya for a 3-min call + chat.
@@ -283,3 +295,4 @@ ok(r.status === 200 && r.body.agency.code === 'STAR1048', 'join active agency')
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED')
 await disconnectDb()
+process.exit(fails ? 1 : 0)

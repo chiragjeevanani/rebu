@@ -35,9 +35,10 @@ import { num } from '../../utils/format';
 import Txt from '../../components/Txt';
 import GiftSheet from '../../components/GiftSheet';
 import { CoinIcon } from '../../components/CoinPill';
-import { BIG_GIFT_COINS, useGiftFx } from '../../components/GiftFx';
+import { useGiftFx } from '../../components/GiftFx';
 import { compact } from '../../components/Live';
 import { useSecureScreen } from '../../utils/secure';
+import { giftText } from '../../utils/gifts';
 import { RtcSurfaceView, RtcTextureView } from 'react-native-agora';
 import { del, get, post } from '../../api/client';
 import { useSocketEvent } from '../../api/socket';
@@ -92,10 +93,22 @@ export default function LiveRoomScreen({ navigation, route }) {
     ]);
   const fromServer = m =>
     m.kind === 'gift'
-      ? { id: m.id, name: m.user?.name, photo: m.user?.photo, gift: m.gift }
+      ? {
+          id: m.id,
+          name: m.user?.name,
+          photo: m.user?.photo,
+          frame: m.user?.frame,
+          gift: m.gift,
+        }
       : m.kind === 'system'
       ? { id: m.id, system: true, text: m.text }
-      : { id: m.id, name: m.user?.name, photo: m.user?.photo, text: m.text };
+      : {
+          id: m.id,
+          name: m.user?.name,
+          photo: m.user?.photo,
+          frame: m.user?.frame,
+          text: m.text,
+        };
   const toGuests = list =>
     (list || []).map(g => ({
       id: g.user.id,
@@ -105,6 +118,21 @@ export default function LiveRoomScreen({ navigation, route }) {
       uid: g.uid,
       muted: g.muted,
     }));
+
+  // A viewer who isn't following the host follows them after a minute in the live.
+  const followRef = useRef(followingHost);
+  followRef.current = followingHost;
+  const joined = !!live;
+  useEffect(() => {
+    if (!joined || followRef.current) return;
+    const t = setTimeout(() => {
+      if (followRef.current || left.current) return;
+      toggleFollow(host.id);
+      say({ system: true, text: `You’re now following ${host.name} 💜` });
+    }, 60000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joined, host.id]);
 
   // Join: the server charges premium tickets once, returns a viewer token.
   useEffect(() => {
@@ -121,8 +149,20 @@ export default function LiveRoomScreen({ navigation, route }) {
         setChat(c => [...c, ...(d.chat || []).map(fromServer)]);
         setAgora(j.agora);
       } catch (e) {
+        // Premium ticket, or below the admin's minimum balance for lives.
         if (e.code === 'insufficient_coins') {
-          navigation.replace('Wallet');
+          Alert.alert(
+            'Not enough coins',
+            e.message,
+            [
+              { text: 'Not now', style: 'cancel', onPress: navigation.goBack },
+              {
+                text: 'Recharge',
+                onPress: () => navigation.replace('Wallet'),
+              },
+            ],
+            { onDismiss: navigation.goBack },
+          );
           return;
         }
         Alert.alert('Live unavailable', e.message);
@@ -152,8 +192,15 @@ export default function LiveRoomScreen({ navigation, route }) {
     if (!here(p)) return;
     setDiamonds(p.diamonds);
     setGoal(g => g + (p.gift?.coins || 0));
-    if (p.from?.id !== user.id)
-      say({ name: p.from?.name, photo: p.from?.photo, gift: p.gift });
+    if (p.from?.id !== user.id) {
+      say({
+        name: p.from?.name,
+        photo: p.from?.photo,
+        frame: p.from?.senderTier?.color,
+        gift: p.gift,
+      });
+      fx.play(p.gift, { from: p.from?.name, photo: p.from?.photo });
+    }
   });
   useSocketEvent('live:guests', p => here(p) && setGuests(toGuests(p.guests)));
   useSocketEvent('live:accepted', p => {
@@ -215,13 +262,19 @@ export default function LiveRoomScreen({ navigation, route }) {
       });
       setCoinsFromServer(r.balance);
       onGiftSent(g);
-      if (g.coins >= BIG_GIFT_COINS) fx.play(g, { to: host.name });
+      fx.play(g, { to: host.name });
     } catch (e) {
       if (e.code === 'insufficient_coins') navigation.navigate('Wallet');
       else say({ system: true, text: e.message });
     }
   };
-  const onGiftSent = g => say({ name: 'You', photo: user.photos[0], gift: g });
+  const onGiftSent = g =>
+    say({
+      name: 'You',
+      photo: user.photos[0],
+      frame: user.senderTier?.color,
+      gift: g,
+    });
 
   const send = async () => {
     const t = text.trim();
@@ -396,7 +449,13 @@ export default function LiveRoomScreen({ navigation, route }) {
               </Txt>
             ) : (
               <View key={m.id} style={styles.msg}>
-                <Image source={{ uri: m.photo }} style={styles.msgAvatar} />
+                <Image
+                  source={{ uri: m.photo }}
+                  style={[
+                    styles.msgAvatar,
+                    m.frame ? { borderWidth: 2, borderColor: m.frame } : null,
+                  ]}
+                />
                 <View style={styles.flex}>
                   {m.joined ? (
                     <Txt style={styles.joined}>
@@ -408,7 +467,7 @@ export default function LiveRoomScreen({ navigation, route }) {
                       <Txt style={styles.msgName}>{m.name}</Txt>
                       <Txt style={[styles.msgText, m.gift && styles.msgGift]}>
                         {m.gift
-                          ? `sent ${m.gift.emoji} ${m.gift.name}`
+                          ? `sent ${giftText(m.gift)}`
                           : m.text}
                       </Txt>
                     </>

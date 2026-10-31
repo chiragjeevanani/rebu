@@ -37,9 +37,11 @@ import Avatar from '../../components/Avatar';
 import Button from '../../components/Button';
 import IconButton from '../../components/IconButton';
 import GiftSheet from '../../components/GiftSheet';
+import { useGiftFx } from '../../components/GiftFx';
 import Sheet from '../../components/Sheet';
 import ListRow from '../../components/ListRow';
 import { useSecureScreen } from '../../utils/secure';
+import { giftText } from '../../utils/gifts';
 
 function Seat({ index, person, pending, video, rtc, onPress }) {
   const remote = person && rtc.live && rtc.remoteUids.includes(person.uid);
@@ -84,6 +86,7 @@ export default function RoomScreen({ navigation, route }) {
   const { room: start } = route.params;
   const roomId = start.id;
   const { user, setCoinsFromServer } = useApp();
+  const fx = useGiftFx();
   const insets = useSafeAreaInsets();
 
   const [room, setRoom] = useState(null); // server live
@@ -125,7 +128,7 @@ export default function RoomScreen({ navigation, route }) {
       ? {
           id: m.id,
           name: m.user?.name,
-          text: `sent ${m.gift?.emoji} ${m.gift?.name}`,
+          text: `sent ${giftText(m.gift)}`,
           gift: true,
         }
       : m.kind === 'system'
@@ -190,9 +193,10 @@ export default function RoomScreen({ navigation, route }) {
     if (!here(p) || p.from?.id === user.id) return;
     say({
       name: p.from?.name,
-      text: `sent ${p.gift?.emoji} ${p.gift?.name}`,
+      text: `sent ${giftText(p.gift)}`,
       gift: true,
     });
+    fx.play(p.gift, { from: p.from?.name, photo: p.from?.photo });
   });
   useSocketEvent('live:guests', p => {
     if (!here(p)) return;
@@ -461,7 +465,7 @@ export default function RoomScreen({ navigation, route }) {
         onSend={g =>
           say({
             name: 'You',
-            text: `sent ${g.emoji} ${g.name} to ${gift?.name}`,
+            text: `sent ${giftText(g)} to ${gift?.name}`,
             gift: true,
           })
         }

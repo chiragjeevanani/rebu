@@ -13,9 +13,11 @@ import {
 } from 'lucide-react-native';
 import { colors, fonts, spacing } from '../theme';
 import { useApp } from '../context/AppContext';
+import { canGoLive } from '../utils/hosting';
 import { num } from '../utils/format';
 import Txt from './Txt';
 import { CoinIcon } from './CoinPill';
+import { useFrame, useRegisterSlot, useSlot } from '../navigation/headerSlots';
 
 // Deterministic demo stats so numbers don't jump between renders.
 export const hostStats = h => {
@@ -32,8 +34,38 @@ export const compact = n => {
   return String(n);
 };
 
-/** Avatar · coin balance · action icon(s). */
-export function TopBar({ right }) {
+/**
+ * Avatar · coin balance · action icon(s). In the main tabs one shared bar sits
+ * above the pages (see MainTabs); each tab's <TopBar right=…/> only supplies
+ * its icons.
+ */
+export function TopBar(props) {
+  const frame = useFrame();
+  if (frame?.kind === 'tabs') return <TabIcons frame={frame} {...props} />;
+  return <TopBarView {...props} />;
+}
+
+function TabIcons({ frame, right }) {
+  useRegisterSlot(frame.routeKey, { right });
+  return null;
+}
+
+/** The icons the focused tab registered (the Events megaphone by default). */
+export function TabTopBarRight({ routeKey }) {
+  const slot = useSlot(routeKey);
+  return slot?.right || <EventsIcon />;
+}
+
+function EventsIcon() {
+  const navigation = useNavigation();
+  return (
+    <Pressable onPress={() => navigation.navigate('Events')} hitSlop={8}>
+      <Megaphone size={25} color={colors.ink} strokeWidth={1.9} />
+    </Pressable>
+  );
+}
+
+export function TopBarView({ right }) {
   const navigation = useNavigation();
   const { user, coins } = useApp();
   return (
@@ -52,11 +84,7 @@ export function TopBar({ right }) {
         </View>
       </Pressable>
       <View style={styles.flex} />
-      {right || (
-        <Pressable onPress={() => navigation.navigate('Events')} hitSlop={8}>
-          <Megaphone size={25} color={colors.ink} strokeWidth={1.9} />
-        </Pressable>
-      )}
+      {right || <EventsIcon />}
     </View>
   );
 }
@@ -130,6 +158,9 @@ export function LiveCard({ host, width, height = 266, onPress }) {
 /** Floating camera button above the tab bar: opens the Go Live studio. */
 export function CallFab() {
   const navigation = useNavigation();
+  const { user, config } = useApp();
+  // Going live is for women only.
+  if (!canGoLive(user, config)) return null;
   return (
     <Pressable
       style={styles.fab}

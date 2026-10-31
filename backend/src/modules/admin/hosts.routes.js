@@ -6,10 +6,10 @@ import { requireAdmin } from '../../core/auth.js'
 import { toUser } from '../../core/realtime.js'
 import { Admin } from '../admins/admin.model.js'
 import { audit } from '../audit/audit.model.js'
-import { User } from '../users/user.model.js'
-import { Agency, PayoutMethod } from '../hosts/hosts.models.js'
+import { User, hostCategoryOf } from '../users/user.model.js'
+import { Agency, HostApplication, PayoutMethod } from '../hosts/hosts.models.js'
 import { Earning, Withdrawal } from '../earnings/earnings.models.js'
-import { adjustEarnings, hostBalance, levelForMinutes } from '../wallet/economy.service.js'
+import { adjustEarnings, hostBalance, levelForGifts } from '../wallet/economy.service.js'
 import { getConfig } from '../config/config.service.js'
 import { Report } from '../reports/reports.models.js'
 import { applyStatus, balancesFor, oid, optModel, round2, rx, sorting, statusBody, statusText, withId, whoMap } from './admin.util.js'
@@ -35,6 +35,8 @@ function hostRow(u, bal) {
     level: h.levelOverride || h.level,
     autoLevel: h.level,
     levelOverride: h.levelOverride ?? null,
+    category: hostCategoryOf(h.levelOverride || h.level),
+    giftCoins: h.giftCoins || 0,
     rates: h.rates,
     status: h.status,
     accountStatus: u.status,
@@ -75,6 +77,20 @@ hostsAdmin.get(
     }
     if (and.length) f.$and = and
     const sort = sorting(q, { name: 'host.displayName', joined: 'host.approvedAt', minutes: 'host.callMinutes', rating: 'host.rating', level: 'host.level' }, { 'host.approvedAt': -1 })
+    // Money sorts need every matching host's balance; others page in the database.
+    const money = q.sort === 'lifetime' || q.sort === 'available'
+    if (money) {
+      const all = await User.find(f, { _id: 1 }).limit(5000).lean()
+      const bals = await balancesFor(all.map(u => u._id))
+      const dir = q.dir === 'asc' ? 1 : -1
+      const ids = all
+        .map(u => String(u._id))
+        .sort((a, b) => dir * ((bals.get(a)?.[q.sort] || 0) - (bals.get(b)?.[q.sort] || 0)))
+        .slice(pg.skip, pg.skip + pg.limit)
+      const page = await User.find({ _id: { $in: ids } }).lean()
+      const byId = new Map(page.map(u => [String(u._id), u]))
+      return res.json(paged(ids.map(i => hostRow(byId.get(i), bals.get(i))), all.length, pg))
+    }
     const [rows, total] = await Promise.all([User.find(f).sort(sort).skip(pg.skip).limit(pg.limit).lean(), User.countDocuments(f)])
     // Balances for this page only, in two aggregates.
     const bals = await balancesFor(rows.map(u => u._id))
@@ -104,11 +120,35 @@ async function loadHost(id) {
   return u
 }
 
+/** How many hosts sit at each level and price (Host levels page). */
+hostsAdmin.get(
+  '/stats',
+  ah(async (req, res) => {
+    const base = { 'host.approved': true, 'host.status': 'active' }
+    const level = { $ifNull: ['$host.levelOverride', '$host.level'] }
+    const [total, byLevel, video, voice] = await Promise.all([
+      User.countDocuments(base),
+      User.aggregate([{ $match: base }, { $group: { _id: level, n: { $sum: 1 } } }]),
+      User.aggregate([{ $match: base }, { $group: { _id: '$host.rates.video', n: { $sum: 1 } } }]),
+      User.aggregate([{ $match: base }, { $group: { _id: '$host.rates.voice', n: { $sum: 1 } } }]),
+    ])
+    const obj = rows => Object.fromEntries(rows.filter(r => r._id != null).map(r => [r._id, r.n]))
+    res.json({ total, byLevel: obj(byLevel), byRate: { video: obj(video), voice: obj(voice) } })
+  }),
+)
+
+/** ID type and last 4 digits from the host's approved application. */
+export async function idInfo(userId) {
+  const app = await HostApplication.findOne({ user: userId, status: 'approved' }, { id: 1 }).sort({ createdAt: -1 }).lean()
+  return { idType: app?.id?.type || null, idLast4: app?.id?.last4 || null }
+}
+
 hostsAdmin.get(
   '/:id',
   ah(async (req, res) => {
     const u = await loadHost(req.params.id)
     const id = u._id
+    const id_ = id
     const Call = optModel('Call')
     const Live = optModel('Live')
     const since30 = new Date(Date.now() - 30 * 24 * 3600 * 1000)
@@ -135,8 +175,20 @@ hostsAdmin.get(
       PayoutMethod.find({ host: id }).lean(),
     ])
     const users = await whoMap(calls.map(c => c.caller))
+    // Answer rate: calls the host picked up out of those that rang them (30 days).
+    const [rang, answered, ident] = await Promise.all([
+      Call ? Call.countDocuments({ host: id_, createdAt: { $gte: since30 }, status: { $in: ['ended', 'missed', 'declined', 'connected'] } }) : 0,
+      Call ? Call.countDocuments({ host: id_, createdAt: { $gte: since30 }, connectedAt: { $ne: null } }) : 0,
+      idInfo(id_),
+    ])
     res.json({
-      host: { ...hostRow(u, balance), notes: u.notes || '' },
+      host: {
+        ...hostRow(u, balance),
+        notes: u.notes || '',
+        answerRate: rang ? Math.round((answered / rang) * 100) : null,
+        followers: u.followersCount || 0,
+        ...ident,
+      },
       balance,
       earnings: {
         bySource: Object.fromEntries(bySource.map(s => [s._id, { net: round2(s.net), gross: round2(s.gross), count: s.count, last30: round2(s.net30) }])),
@@ -182,7 +234,7 @@ hostsAdmin.patch(
       if (body.levelOverride !== null && !hostLevels.some(l => l.level === body.levelOverride)) throw badRequest('Unknown level.')
       override = body.levelOverride
       set['host.levelOverride'] = override
-      const auto = levelForMinutes(u.host.callMinutes || 0)
+      const auto = levelForGifts(u.host.giftCoins || 0)
       set['host.level'] = auto
       what.push(override ? `Set level to ${override} (manual)` : `Set level to automatic (${auto})`)
     }

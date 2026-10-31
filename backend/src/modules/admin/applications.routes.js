@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { ah, parse, paging, paged } from '../../core/http.js'
-import { conflict, notFound } from '../../core/errors.js'
+import { badRequest, conflict, notFound } from '../../core/errors.js'
 import { requireAdmin } from '../../core/auth.js'
 import { Admin } from '../admins/admin.model.js'
 import { audit } from '../audit/audit.model.js'
@@ -121,6 +121,10 @@ applicationsAdmin.post(
     const approve = await hostsService('approveApplication')
     if (!approve) throw notReady('Host approval')
     const a = await pendingApp(req.params.id)
+    // Applications sent before hosting became women-only can't be approved.
+    if (getConfig().settings.hostApply.womenOnly && a.gender !== 'Female') {
+      throw badRequest('Hosting is open to women only. Reject this application, or turn off "Women only" in App settings.')
+    }
     const result = await approve(a, req.admin.name)
     await audit(req, `Approved host application — ${a.name}`, a._id, { user: String(a.user) })
     const fresh = await HostApplication.findById(a._id).lean()

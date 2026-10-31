@@ -21,6 +21,27 @@ export const ECONOMY = {
   welcomeBonusCoins: 1000, // credited when a host is approved
 };
 
+/**
+ * The admin panel owns these numbers. The app starts with the defaults above
+ * and replaces them with the server's (GET /config) as soon as it has them, so
+ * every ₹ figure on screen (earnings per minute, coin value, withdrawal limits)
+ * follows what admins set. Mutates ECONOMY because helpers read it directly.
+ */
+export function applyEconomy(e) {
+  if (!e) return;
+  for (const k of [
+    'coinInr',
+    'agencyCut',
+    'withdrawFee',
+    'minWithdraw',
+    'payoutTime',
+    'welcomeBonusCoins',
+  ]) {
+    if (e[k] !== undefined && e[k] !== null) ECONOMY[k] = e[k];
+  }
+  if (e.commission) ECONOMY.commission = { ...ECONOMY.commission, ...e.commission };
+}
+
 export const SOURCES = {
   video: { label: 'Video calls', unit: 'min' },
   voice: { label: 'Voice calls', unit: 'min' },

@@ -13,7 +13,8 @@ import { configAdmin } from './config.routes.js'
 import { contentAdmin } from './content.routes.js'
 import { adminsAdmin, auditAdmin } from './admins.routes.js'
 import { momentsAdmin } from '../moments/moments.js'
-import { imageUpload } from '../uploads/uploads.routes.js'
+import { targetsAdmin } from '../hosts/targets.js'
+import { imageUpload, lottieUpload } from '../uploads/uploads.routes.js'
 
 export { publicContentRoutes } from './content.routes.js'
 
@@ -30,6 +31,7 @@ adminRoutes.use('/agencies', agenciesAdmin)
 adminRoutes.use('/calls', callsAdmin)
 adminRoutes.use('/lives', livesAdmin)
 adminRoutes.use('/moments', momentsAdmin)
+adminRoutes.use('/targets', targetsAdmin)
 adminRoutes.use('/reports', reportsAdmin)
 adminRoutes.use('/support', supportAdmin)
 adminRoutes.use('/finance', financeAdmin)
@@ -37,5 +39,6 @@ adminRoutes.use('/config', configAdmin)
 adminRoutes.use('/content', contentAdmin)
 // Banner images etc.: raw image body → { url }
 adminRoutes.post('/uploads', requireAdmin(Admin, 'content'), ...imageUpload(() => 'admin'))
+adminRoutes.post('/uploads/animation', requireAdmin(Admin, 'monetization'), lottieUpload)
 adminRoutes.use('/admins', adminsAdmin)
 adminRoutes.use('/audit', auditAdmin)

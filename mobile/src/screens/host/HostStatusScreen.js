@@ -91,7 +91,7 @@ const COPY = {
 };
 
 export default function HostStatusScreen({ navigation }) {
-  const { hostApp, user } = useApp();
+  const { hostApp, user, config } = useApp();
   const status = hostApp.status === 'none' ? 'pending' : hostApp.status;
   const copy = COPY[status];
   const photo = hostApp.data?.photos?.[0] || user.photos[0];
@@ -184,10 +184,10 @@ export default function HostStatusScreen({ navigation }) {
           ]}
         />
 
-        {status === 'pending' ? (
+        {status === 'pending' && config?.settings?.hostApply?.autoApprove ? (
           <Txt variant="tiny" center style={styles.demo}>
-            Test build: applications are approved automatically about 20 seconds
-            after submitting.
+            Applications are approved automatically about 20 seconds after
+            submitting.
           </Txt>
         ) : null}
       </View>

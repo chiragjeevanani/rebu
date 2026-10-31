@@ -23,7 +23,8 @@ import {
 } from '../api/client';
 import { connectSocket, disconnectSocket, onSocket } from '../api/socket';
 import { refreshHosts } from '../api/hosts';
-import { hostBalance } from '../data/economy';
+import { applyEconomy, hostBalance } from '../data/economy';
+import { activeCall } from '../utils/callState';
 
 const AppContext = createContext(null);
 
@@ -34,16 +35,6 @@ export const HOST_RATE_TIERS = {
   video: [30, 40, 60, 80, 100, 150, 200, 300],
   voice: [15, 20, 30, 40, 60, 80, 100, 150],
 };
-// Host levels: total connected call minutes needed, and the price cap unlocked.
-export const HOST_LEVELS = [
-  { level: 1, minutes: 0, maxRate: 60 },
-  { level: 2, minutes: 300, maxRate: 100 },
-  { level: 3, minutes: 1000, maxRate: 200 },
-  { level: 4, minutes: 3000, maxRate: 300 },
-];
-export const HOST_LEVEL_MAX = Object.fromEntries(
-  HOST_LEVELS.map(l => [l.level, l.maxRate]),
-);
 
 // Server user → the shape screens already use (photos[0], age, vip…).
 const PLACEHOLDER = 'https://i.pravatar.cc/800?img=68';
@@ -65,6 +56,7 @@ export function toAppUser(u) {
     verified: !!u.verified,
     vip: u.vip?.until && new Date(u.vip.until) > new Date() ? u.vip.level : 0,
     followers: u.followersCount || 0,
+    senderTier: u.senderTier || null,
     following: (u.following || []).length,
     server: u,
   };
@@ -125,13 +117,16 @@ export function AppProvider({ children }) {
   // Incoming calls for hosts arrive over the socket (server rings us).
   useEffect(
     () =>
-      onSocket('call:incoming', ({ call, caller }) =>
-        setIncomingCall({
-          ...caller,
-          photos: caller.photos?.length ? caller.photos : [caller.photo],
-          video: call.type === 'video',
-          call,
-        }),
+      onSocket('call:incoming', ({ call, caller, joining }) =>
+        // Already on a call: CallScreen offers to add this caller instead.
+        joining && activeCall.hostInCall
+          ? null
+          : setIncomingCall({
+              ...caller,
+              photos: caller.photos?.length ? caller.photos : [caller.photo],
+              video: call.type === 'video',
+              call,
+            }),
       ),
     [],
   );
@@ -289,7 +284,10 @@ export function AppProvider({ children }) {
   useEffect(() => {
     setUnauthorizedHandler(() => endSession());
     get('/config')
-      .then(setConfig)
+      .then(c => {
+        applyEconomy(c.economy);
+        setConfig(c);
+      })
       .catch(() => {});
     (async () => {
       const t = await loadToken();
@@ -379,9 +377,11 @@ export function AppProvider({ children }) {
         .reduce((n, e) => n + (e.minutes || 0), 0),
     [earnings, hostInfo],
   );
-  const hostLevel =
-    hostInfo?.level ??
-    HOST_LEVELS.filter(l => callMinutes >= l.minutes).pop().level;
+  // Levels come from gift coins received; the server sends the level, its
+  // category (Iron … Diamond) and the price cap that category allows.
+  const hostLevel = hostInfo?.level ?? 1;
+  const hostMaxRate = hostInfo?.maxRate ?? 60;
+  const hostCategory = hostInfo?.category || null;
 
   const balance = useMemo(
     () => serverBalance || hostBalance(earnings, withdrawals),
@@ -520,6 +520,8 @@ export function AppProvider({ children }) {
       hostApp,
       hostRates,
       hostLevel,
+      hostMaxRate,
+      hostCategory,
       callMinutes,
       hostOnline,
       incomingCall,
@@ -585,6 +587,8 @@ export function AppProvider({ children }) {
       hostApp,
       hostRates,
       hostLevel,
+      hostMaxRate,
+      hostCategory,
       callMinutes,
       hostOnline,
       incomingCall,

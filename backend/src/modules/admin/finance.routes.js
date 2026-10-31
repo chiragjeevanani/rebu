@@ -8,10 +8,12 @@ import { notify } from '../notifications/notifications.js'
 import { Admin } from '../admins/admin.model.js'
 import { audit } from '../audit/audit.model.js'
 import { User } from '../users/user.model.js'
-import { Payment } from '../wallet/wallet.models.js'
+import { CoinTxn, Payment } from '../wallet/wallet.models.js'
+import { getConfig } from '../config/config.service.js'
 import { Dispute, Earning, Withdrawal } from '../earnings/earnings.models.js'
 import { adjustEarnings, creditCoins, debitCoins, hostBalance, withTxn } from '../wallet/economy.service.js'
 import { DAY, dayExpr, dayKeys, istDayStart, round2, rx, sorting, withId, whoMap } from './admin.util.js'
+import { idInfo } from './hosts.routes.js'
 
 export const financeAdmin = Router()
 financeAdmin.use(requireAdmin(Admin, 'finance'))
@@ -88,7 +90,7 @@ export async function markPaymentSuccess(paymentId, meta = {}) {
     if (!p) return null
     const coins = p.coins + (p.bonus || 0)
     const balance = await creditCoins(p.user, coins, { type: 'purchase', title: `Bought ${p.coins}${p.bonus ? ` + ${p.bonus} bonus` : ''} coins`, ref: { kind: 'Payment', id: p._id } }, s)
-    await User.updateOne({ _id: p.user }, { $inc: { spent: p.amount } }, { session: s })
+    await User.updateOne({ _id: p.user }, { $inc: { spent: p.amount, coinsBought: coins } }, { session: s })
     return { payment: p, balance, coins }
   })
 }
@@ -213,7 +215,7 @@ financeAdmin.get(
       hostBalance(w.host),
       Withdrawal.find({ host: w.host, _id: { $ne: w._id } }).sort({ createdAt: -1 }).limit(10).lean(),
     ])
-    res.json({ withdrawal: wdRow(w, people), balance, history: history.map(x => wdRow(x, people)) })
+    res.json({ withdrawal: { ...wdRow(w, people), ...(await idInfo(w.host)) }, balance, history: history.map(x => wdRow(x, people)) })
   }),
 )
 
@@ -381,6 +383,31 @@ financeAdmin.post(
   }),
 )
 
+// ── Gift sales ───────────────────────────────────────────────────────────
+financeAdmin.get(
+  '/gifts',
+  ah(async (req, res) => {
+    const days = Math.min(365, Math.max(1, Number(req.query.days) || 30))
+    const { gifts, economy } = getConfig()
+    const rows = await CoinTxn.aggregate([
+      { $match: { type: 'gift', coins: { $lt: 0 }, createdAt: { $gte: istDayStart(days - 1) } } },
+      // Older rows have no giftKey; their title is "Gift · <name>".
+      { $group: { _id: { $ifNull: ['$meta.giftKey', '$title'] }, sent: { $sum: 1 }, coins: { $sum: { $abs: '$coins' } } } },
+    ])
+    const keyOf = id => gifts.find(g => g.key === id || `Gift · ${g.name}` === id)?.key
+    const byKey = new Map()
+    for (const r of rows) {
+      const k = keyOf(r._id)
+      if (!k) continue
+      const cur = byKey.get(k) || { key: k, sent: 0, coins: 0 }
+      cur.sent += r.sent
+      cur.coins += r.coins
+      byKey.set(k, cur)
+    }
+    res.json({ days, items: [...byKey.values()].map(x => ({ ...x, gross: round2(x.coins * economy.coinInr) })) })
+  }),
+)
+
 // ── Revenue ──────────────────────────────────────────────────────────────
 financeAdmin.get(
   '/revenue',
@@ -389,7 +416,9 @@ financeAdmin.get(
     const from = istDayStart(days - 1)
     const prevFrom = new Date(from.getTime() - days * DAY)
     const ok = { status: 'success', createdAt: { $gte: from } }
-    const [byDay, byPack, byMethod, prev, refunds, payouts, payoutDays, take] = await Promise.all([
+    const [payers, attempts, byDay, byPack, byMethod, prev, refunds, payouts, payoutDays, take] = await Promise.all([
+      Payment.distinct('user', ok),
+      Payment.aggregate([{ $match: { createdAt: { $gte: from }, status: { $in: ['success', 'failed', 'refunded'] } } }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
       Payment.aggregate([{ $match: ok }, { $group: { _id: dayExpr('$createdAt'), revenue: { $sum: '$amount' }, count: { $sum: 1 }, coins: { $sum: { $add: ['$coins', '$bonus'] } } } }]),
       Payment.aggregate([{ $match: ok }, { $group: { _id: '$packId', revenue: { $sum: '$amount' }, count: { $sum: 1 } } }, { $sort: { revenue: -1 } }]),
       Payment.aggregate([{ $match: ok }, { $group: { _id: { $ifNull: ['$method', 'unknown'] }, revenue: { $sum: '$amount' }, count: { $sum: 1 } } }, { $sort: { revenue: -1 } }]),
@@ -423,6 +452,15 @@ financeAdmin.get(
       // Take rate: REBU commission as a share of what users spent on hosts (₹ gross).
       earnings: { gross: round2(t.gross), commission: round2(t.commission), agency: round2(t.agency), hostNet: round2(t.net) },
       takeRate: t.gross ? round2((t.commission / t.gross) * 100) : 0,
+      payingUsers: payers.length,
+      arppu: payers.length ? round2(revenue / payers.length) : 0,
+      // Settled attempts that went through (refunded ones did succeed first).
+      successRate: (() => {
+        const a = Object.fromEntries(attempts.map(x => [x._id, x.n]))
+        const good = (a.success || 0) + (a.refunded || 0)
+        const all = good + (a.failed || 0)
+        return all ? round2((good / all) * 100) : null
+      })(),
     })
   }),
 )

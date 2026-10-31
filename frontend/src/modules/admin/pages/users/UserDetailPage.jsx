@@ -29,6 +29,8 @@ import {
   Textarea,
   Who,
 } from '../../components/ui'
+import { FrameChip } from '../../components/LevelChips'
+import { frameOf } from '../../utils/levels'
 import { ago, date, dateTime, duration, inr, label, num } from '../../utils/format'
 
 function AdjustCoins({ open, user, onClose, onSave }) {
@@ -219,7 +221,7 @@ function VerificationRequest({ user: u, onDecide }) {
 }
 
 function UserDetail({ d, reload }) {
-  const { me } = useStore()
+  const { db, me } = useStore()
   const toast = useToast()
   const [tab, setTab] = useState('overview')
   const [modal, setModal] = useState(null) // coins | suspend | ban
@@ -317,6 +319,17 @@ function UserDetail({ d, reload }) {
 
       <div className="a-grid c4" style={{ marginBottom: 20 }}>
         <Stat label="Coin balance" value={num(u.coins)} icon={Coins} />
+        {u.coinsBought != null ? (
+          <Stat
+            label="Coins bought"
+            value={num(u.coinsBought)}
+            sub={
+              <span className="a-row" style={{ gap: 6 }}>
+                Sender frame <FrameChip tier={frameOf(db.config.senderTiers, u.coinsBought)} />
+              </span>
+            }
+          />
+        ) : null}
         <Stat label="Total spent" value={inr(u.spent)} sub={(n => `${n} successful payment${n === 1 ? '' : 's'}`)(payments.filter(p => p.status === 'success').length)} />
         <Stat label="Calls" value={num(calls.length)} sub={`${num(calls.reduce((n, c) => n + (c.minutes || 0), 0))} billed min`} />
         <Stat label="Reports" value={reportsAgainst} sub="against this user" />

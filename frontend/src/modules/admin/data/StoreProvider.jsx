@@ -5,8 +5,8 @@ import { api, errorText, getToken, setToken, setUnauthorizedHandler } from '../a
 import { connectAdminSocket, disconnectAdminSocket, onAdminEvent } from '../api/socket'
 
 // Session, app config and sidebar counters come from the REBU backend.
-// `db` is the old client-side mock, kept only for the few pieces the backend
-// doesn't serve yet (see the TODO(api) notes in the pages that read it).
+// `db` is the old client-side mock; no page reads data from it any more. It
+// remains for the App settings 'Reset mock data' control and db.config's shape.
 const DB_KEY = 'rebu.admin.db.v2'
 
 const load = (key, fallback) => {
@@ -146,6 +146,15 @@ export default function StoreProvider({ children }) {
     return res.value
   }, [me])
 
+  /** Re-read all config (e.g. hostLevels' derived category fields after a category edit). */
+  const refreshConfig = useCallback(async () => {
+    const cfg = await api.get('/admin/config')
+    configRef.current = cfg.config
+    setConfigState(cfg.config)
+    setConfigMeta(cfg.meta || {})
+    return cfg.config
+  }, [])
+
   // ── Mock-only collections (no backend yet) ──────────────────────────────
   const update = useCallback((col, id, patch) => {
     setDb(d => ({
@@ -182,6 +191,7 @@ export default function StoreProvider({ children }) {
       counts,
       refreshCounts,
       setConfig,
+      refreshConfig,
       update,
       create,
       remove,
@@ -189,7 +199,7 @@ export default function StoreProvider({ children }) {
       logout,
       reset,
     }),
-    [view, me, auth, bootError, retryBoot, configMeta, counts, refreshCounts, setConfig, update, create, remove, login, logout, reset],
+    [view, me, auth, bootError, retryBoot, configMeta, counts, refreshCounts, setConfig, refreshConfig, update, create, remove, login, logout, reset],
   )
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>

@@ -2,6 +2,7 @@ import React from 'react';
 import { ScrollView, StatusBar, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '../theme';
+import { useFrame } from '../navigation/headerSlots';
 
 /** Page wrapper handling safe areas, background and optional scrolling. */
 export default function Screen({
@@ -15,8 +16,10 @@ export default function Screen({
   footer,
 }) {
   const insets = useSafeAreaInsets();
+  // A shared header/top bar above this screen already covers the status bar.
+  const covered = useFrame()?.headerShown;
   const pad = {
-    paddingTop: edges.includes('top') ? insets.top : 0,
+    paddingTop: edges.includes('top') && !covered ? insets.top : 0,
     paddingBottom: edges.includes('bottom') ? insets.bottom : 0,
   };
   return (

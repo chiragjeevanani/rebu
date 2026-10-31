@@ -5,6 +5,7 @@ import LinearGradient from 'react-native-linear-gradient';
 import {
   ChevronLeft,
   Crown,
+  Gem,
   Hand,
   MessageCircle,
   User,
@@ -76,6 +77,26 @@ export function VipBadge({ level }) {
       <Crown size={10} color={colors.white} />
       <Txt style={styles.badgeText}>{svip ? 'ELITE' : `VIP${level}`}</Txt>
     </LinearGradient>
+  );
+}
+
+/** Host category from gift levels (Iron … Diamond), in the admin-set colour. */
+export function HostCategoryBadge({ category, level, large }) {
+  if (!category) return null;
+  return (
+    <View
+      style={[
+        styles.badge,
+        large && styles.badgeLarge,
+        { backgroundColor: category.color },
+      ]}
+    >
+      <Gem size={large ? 13 : 10} color={colors.white} />
+      <Txt style={[styles.badgeText, large && styles.badgeTextLarge]}>
+        {category.name}
+        {level ? ` · Lv ${level}` : ''}
+      </Txt>
+    </View>
   );
 }
 
@@ -204,6 +225,8 @@ const styles = StyleSheet.create({
     lineHeight: 14,
     color: colors.white,
   },
+  badgeLarge: { height: 26, borderRadius: 13, paddingHorizontal: 10, gap: 5 },
+  badgeTextLarge: { fontSize: 12.5, lineHeight: 16 },
   badges: { flexDirection: 'row', gap: 6, marginVertical: 4 },
   hiBtn: {
     flexDirection: 'row',

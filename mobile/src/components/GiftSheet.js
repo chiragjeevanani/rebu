@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
+import { Minus, Plus } from 'lucide-react-native';
 import { colors, fonts, radius } from '../theme';
 import { GIFTS } from '../data/mock';
 import { useApp } from '../context/AppContext';
@@ -9,6 +10,56 @@ import Button from './Button';
 import CoinPill, { CoinIcon } from './CoinPill';
 import { BIG_GIFT_COINS, useGiftFx } from './GiftFx';
 import { post } from '../api/client';
+
+/** − / + for the quantity; hold a button to keep counting. */
+function Stepper({ value, onChange, max, dark }) {
+  const timers = useRef({});
+  const latest = useRef(value);
+  latest.current = value;
+  const stop = () => {
+    clearTimeout(timers.current.wait);
+    clearInterval(timers.current.run);
+  };
+  useEffect(() => stop, []);
+  const bump = d => onChange(v => Math.min(max, Math.max(1, v + d)));
+  const hold = d => {
+    bump(d);
+    stop();
+    timers.current.wait = setTimeout(() => {
+      timers.current.run = setInterval(() => {
+        // Reached an end: nothing more to count.
+        if ((d > 0 && latest.current >= max) || (d < 0 && latest.current <= 1))
+          stop();
+        else bump(d);
+      }, 90);
+    }, 350);
+  };
+  const tone = dark ? colors.white : colors.ink;
+  // A plain function (not a component defined here) so the buttons keep their
+  // identity between renders and a held press isn't torn down mid-hold.
+  const button = (Icon, d, off) => (
+    <Pressable
+      onPressIn={() => hold(d)}
+      onPressOut={stop}
+      disabled={off}
+      hitSlop={6}
+      style={[
+        styles.stepBtn,
+        dark && styles.stepBtnDark,
+        off && styles.stepOff,
+      ]}
+    >
+      <Icon size={18} color={tone} />
+    </Pressable>
+  );
+  return (
+    <View style={styles.stepper}>
+      {button(Minus, -1, value <= 1)}
+      <Txt style={[styles.qty, { color: tone }]}>{value}</Txt>
+      {button(Plus, 1, value >= max)}
+    </View>
+  );
+}
 
 export default function GiftSheet({
   visible,
@@ -25,15 +76,31 @@ export default function GiftSheet({
   const gifts = config?.gifts?.length ? config.gifts : GIFTS;
   const fx = useGiftFx();
   const [selected, setSelected] = useState('rose');
+  // How many of the selected gift (one gift type per send).
+  const [qty, setQty] = useState(1);
+  // The limit comes from the admin panel. A server that doesn't send one can't
+  // do bulk sends, and an admin can switch it off with 1: no stepper either way.
+  const limit = config?.economy?.maxGiftQuantity;
+  const max = Number.isFinite(limit) ? Math.max(1, limit) : 1;
+  const multi = max > 1;
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const gift = gifts.find(g => g.key === selected) || gifts[0];
-  const enough = coins >= gift.coins;
+  const total = gift.coins * qty;
+  const enough = coins >= total;
+  const sent = { ...gift, count: qty };
+
+  const pick = key => {
+    // A new gift type starts again at 1, so 10 roses can't turn into 10 rockets.
+    if (key !== selected) setQty(1);
+    setSelected(key);
+  };
 
   const done = () => {
-    onSend?.(gift);
+    onSend?.(sent);
     onClose();
-    if (gift.coins >= BIG_GIFT_COINS) fx.play(gift, { to });
+    fx.play(sent, { to });
+    setQty(1);
   };
 
   const send = async () => {
@@ -45,9 +112,15 @@ export default function GiftSheet({
         const r = await post('/gifts', {
           toId,
           giftKey: gift.key,
+          quantity: qty,
           context: context || { type: 'chat' },
         });
         setCoinsFromServer(r.balance);
+        // An older server would ignore quantity and charge for one.
+        if (qty > 1 && r.quantity !== qty) {
+          setError('Update needed: this server can’t send several at once.');
+          return;
+        }
         done();
       } catch (e) {
         if (e.code === 'insufficient_coins') onRecharge?.();
@@ -74,7 +147,7 @@ export default function GiftSheet({
           return (
             <Pressable
               key={g.key}
-              onPress={() => setSelected(g.key)}
+              onPress={() => pick(g.key)}
               style={[
                 styles.item,
                 dark && styles.itemDark,
@@ -104,15 +177,36 @@ export default function GiftSheet({
           );
         })}
       </View>
+      {multi ? (
+        <View style={styles.qtyRow}>
+          <View style={styles.qtyText}>
+            <Txt
+              style={[
+                styles.qtyLabel,
+                { color: dark ? colors.white : colors.ink },
+              ]}
+            >
+              Quantity
+            </Txt>
+            <Txt
+              variant="tiny"
+              color={dark ? 'rgba(255,255,255,0.6)' : colors.textMuted}
+            >
+              One gift at a time · up to {max}
+            </Txt>
+          </View>
+          <Stepper value={qty} onChange={setQty} max={max} dark={dark} />
+        </View>
+      ) : null}
       <Button
         title={
           enough
-            ? `Send ${gift.name} · ${gift.coins} coins`
+            ? `Send ${qty > 1 ? `${qty} × ` : ''}${gift.name} · ${total} coins`
             : 'Not enough coins · Recharge'
         }
         onPress={send}
         loading={sending}
-        style={{ marginTop: 16 }}
+        style={{ marginTop: 12 }}
       />
       {error ? (
         <Txt variant="small" center color={colors.danger} style={styles.error}>
@@ -125,6 +219,26 @@ export default function GiftSheet({
 
 const styles = StyleSheet.create({
   error: { marginTop: 8 },
+  qtyRow: { flexDirection: 'row', alignItems: 'center', marginTop: 16 },
+  qtyText: { flex: 1 },
+  qtyLabel: { fontFamily: fonts.semibold, fontSize: 14 },
+  stepper: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  stepBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceMuted,
+  },
+  stepBtnDark: { backgroundColor: 'rgba(255,255,255,0.12)' },
+  stepOff: { opacity: 0.35 },
+  qty: {
+    minWidth: 46,
+    textAlign: 'center',
+    fontFamily: fonts.extrabold,
+    fontSize: 20,
+  },
   fxTag: {
     position: 'absolute',
     top: 4,

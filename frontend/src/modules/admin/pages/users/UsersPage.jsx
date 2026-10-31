@@ -2,9 +2,12 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { BadgeCheck, Ban, Download, RotateCcw, ShieldOff } from 'lucide-react'
 import { useToast } from '../../hooks/useToast'
+import { useStore } from '../../hooks/useStore'
 import { serverTable, useApi, usePaging } from '../../hooks/useApi'
 import { api, errorText } from '../../api/client'
 import { Badge, Button, Card, Confirm, DataTable, PageHeader, SearchInput, Seg, Select, Status, Tabs, Who } from '../../components/ui'
+import { FrameChip } from '../../components/LevelChips'
+import { frameOf } from '../../utils/levels'
 import { ago, date, exportCsv, inr, num } from '../../utils/format'
 
 const STATUS = [
@@ -27,6 +30,7 @@ function useDebounced(value, delay = 300) {
 const total = res => res.data?.total ?? 0
 
 export default function UsersPage() {
+  const { db } = useStore()
   const toast = useToast()
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
@@ -104,6 +108,10 @@ export default function UsersPage() {
     { key: 'lastActive', label: 'Last active', serverSort: 'lastActive', render: u => <span className="a-muted a-nowrap">{ago(u.lastActive)}</span> },
     { key: 'coins', label: 'Coins', align: 'right', serverSort: 'coins', render: u => num(u.coins) },
     { key: 'spent', label: 'Spent', align: 'right', serverSort: 'spent', render: u => <b className="a-strong">{inr(u.spent)}</b> },
+    // TODO(api): GET /admin/users → items[].coinsBought (lifetime coins bought → sender frame). The column shows once it's sent.
+    ...(rows?.some(u => u.coinsBought != null)
+      ? [{ key: 'frame', label: 'Frame', render: u => <FrameChip tier={frameOf(db.config.senderTiers, u.coinsBought)} /> }]
+      : []),
     { key: 'vip', label: 'VIP', render: u => (u.vip ? <Badge tone="warning">{u.vip >= 4 ? 'Elite' : `VIP ${u.vip}`}</Badge> : <span className="a-faint">—</span>) },
     {
       key: 'status',

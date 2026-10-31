@@ -101,17 +101,23 @@ function Bubble({ m, photo, name }) {
   }
   const mine = m.from === 'me';
   if (m.type === 'gift') {
-    const g = GIFTS.find(x => x.key === m.gift);
+    // The server's copy first (admins can add gifts the bundled list lacks).
+    const g = m.giftInfo?.emoji
+      ? m.giftInfo
+      : GIFTS.find(x => x.key === m.gift) || { emoji: '🎁', name: 'gift', coins: 0 };
+    const n = g.count > 1 ? g.count : 1;
     return (
       <View style={[styles.line, mine && styles.lineMine]}>
         {!mine ? <Avatar uri={photo} size={28} /> : null}
         <LinearGradient colors={['#FFF6DA', '#FFF6DA']} style={styles.gift}>
           <Txt style={{ fontSize: 44, lineHeight: 52 }}>{g.emoji}</Txt>
           <Txt variant="label">
-            {mine ? `You sent a ${g.name}` : `Sent you a ${g.name}`}
+            {mine
+              ? `You sent ${n > 1 ? `${n} × ` : 'a '}${g.name}`
+              : `Sent you ${n > 1 ? `${n} × ` : 'a '}${g.name}`}
           </Txt>
           <Txt variant="tiny" color={colors.coin}>
-            {g.coins} coins
+            {g.coins * n} coins
           </Txt>
         </LinearGradient>
       </View>
@@ -290,7 +296,13 @@ export default function ChatRoomScreen({ navigation, route }) {
           style={styles.who}
           onPress={() => navigation.navigate('HostProfile', { host })}
         >
-          <Avatar uri={chat.photo} size={42} ring online={chat.online} />
+          <Avatar
+            uri={chat.photo}
+            size={42}
+            ring
+            online={chat.online}
+            frame={chat.peer?.senderTier}
+          />
           <View>
             <Txt variant="h3">{chat.name}</Txt>
             <Txt

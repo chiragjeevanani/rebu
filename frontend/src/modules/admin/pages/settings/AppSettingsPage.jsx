@@ -323,6 +323,12 @@ function HostsTab({ d, set }) {
         <Setting title="Minimum age" description="Applicants younger than this are rejected. Checked against the ID.">
           <NumInput value={d.hostApply.minAge} min={18} max={30} affix="yrs" onChange={v => ha({ minAge: v })} />
         </Setting>
+        <Setting title="Women only" description="Only women can apply to host. Existing hosts keep hosting.">
+          <Switch checked={d.hostApply.womenOnly !== false} onChange={v => ha({ womenOnly: v })} />
+        </Setting>
+        <Setting title="Live & rooms: women only" description="Only women can go live or create party and audio rooms. Men can still watch, join rooms and send gifts.">
+          <Switch checked={d.hostApply.liveWomenOnly !== false} onChange={v => ha({ liveWomenOnly: v })} />
+        </Setting>
         <Setting title="Require selfie" description="Applicants take a live selfie that is matched against their photos.">
           <Switch checked={d.hostApply.requireSelfie} onChange={v => ha({ requireSelfie: v })} />
         </Setting>
@@ -350,6 +356,12 @@ function HostsTab({ d, set }) {
         <Setting title="Ring timeout" description="A call is marked missed if the host doesn’t answer in time.">
           <NumInput value={d.limits.ringTimeoutSecs} min={10} max={90} affix="sec" onChange={v => lim({ ringTimeoutSecs: v })} />
         </Setting>
+        <Setting
+          title="Callers at once"
+          description="How many users a host can be on a call with at the same time. Each caller is billed separately at the host’s price."
+        >
+          <NumInput value={d.limits.maxCallsAtOnce ?? 1} min={1} max={4} affix="calls" onChange={v => lim({ maxCallsAtOnce: v })} />
+        </Setting>
       </Card>
     </div>
   )
@@ -359,10 +371,11 @@ const hostsError = d => {
   const { minAge, requireId, idTypes } = d.hostApply
   if (!(minAge >= 18)) return 'Minimum age can’t be below 18'
   if (requireId && idTypes.length === 0) return 'Add at least one accepted ID type'
-  const { maxGuestsInLive, maxRoomSeats, ringTimeoutSecs } = d.limits
+  const { maxGuestsInLive, maxRoomSeats, ringTimeoutSecs, maxCallsAtOnce } = d.limits
   if (!(maxGuestsInLive >= 0 && maxGuestsInLive <= 8)) return 'Live guests must be 0–8'
   if (!(maxRoomSeats >= 2 && maxRoomSeats <= 16)) return 'Room seats must be 2–16'
   if (!(ringTimeoutSecs >= 10 && ringTimeoutSecs <= 90)) return 'Ring timeout must be 10–90 seconds'
+  if (!(Number.isInteger(maxCallsAtOnce) && maxCallsAtOnce >= 1 && maxCallsAtOnce <= 4)) return 'Callers at once must be 1–4'
   return null
 }
 

@@ -107,6 +107,7 @@ export async function audienceQuery(audience) {
 export async function deliverBroadcast(b) {
   const q = await audienceQuery(b.audience)
   let delivered = 0
+  let pushed = 0
   let batch = []
   const flush = async () => {
     if (!batch.length) return
@@ -114,12 +115,13 @@ export async function deliverBroadcast(b) {
       batch.map(u => ({ user: u._id, kind: 'promo', title: b.title, body: b.body, deeplink: b.deeplink || undefined, broadcast: b._id })),
       { ordered: false },
     )
+    delivered += batch.length
     for (const u of batch) {
       toUser(u._id, 'notification:new', { notification: { kind: 'promo', title: b.title, body: b.body, deeplink: b.deeplink || null, read: false, at: new Date() } })
       const token = u.device?.pushToken
       if (!token) continue
       const r = await sendPush(token, { title: b.title, body: b.body, data: { kind: 'promo', deeplink: b.deeplink || '' } })
-      if (r === 'sent') delivered++
+      if (r === 'sent') pushed++
       if (r === 'invalid_token') await dropToken(u._id, token)
     }
     batch = []
@@ -129,7 +131,7 @@ export async function deliverBroadcast(b) {
     if (batch.length >= 500) await flush()
   }
   await flush()
-  await Broadcast.updateOne({ _id: b._id }, { $set: { delivered } })
+  await Broadcast.updateOne({ _id: b._id }, { $set: { delivered, pushed } })
   return delivered
 }
 
@@ -172,7 +174,10 @@ notificationsRoutes.post(
   ah(async (req, res) => {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(mongoose.isValidObjectId) : null
     const q = { user: req.user._id, readAt: null, ...(ids && { _id: { $in: ids } }) }
+    // Count opens on admin broadcasts before marking read.
+    const opened = await Inbox.aggregate([{ $match: { ...q, broadcast: { $ne: null } } }, { $group: { _id: '$broadcast', n: { $sum: 1 } } }])
     const r = await Inbox.updateMany(q, { $set: { readAt: new Date() } })
+    for (const o of opened) await Broadcast.updateOne({ _id: o._id }, { $inc: { opened: o.n } })
     res.json({ updated: r.modifiedCount })
   }),
 )

@@ -32,6 +32,7 @@ const messageSchema = new Schema(
     name: String,
     photo: String,
     vip: Number,
+    frame: String, // sender frame colour (coins bought tier), '' for none
     text: String,
     gift: Schema.Types.Mixed,
     at: { type: Date, default: Date.now },

@@ -62,7 +62,7 @@ async function requestList(live) {
 const chatOut = m => ({
   id: m.id,
   kind: m.kind,
-  user: m.user ? { id: sid(m.user), name: m.name, photo: m.photo, vip: m.vip || 0 } : null,
+  user: m.user ? { id: sid(m.user), name: m.name, photo: m.photo, vip: m.vip || 0, frame: m.frame || '' } : null,
   text: m.text,
   gift: m.gift,
   at: m.at,
@@ -175,6 +175,11 @@ export async function startLive(owner, { mode, title, cover, ticket, allowGuests
   const { features, limits } = getConfig().settings
   if (isRoom(mode) && !features.rooms) throw forbidden('Rooms are turned off right now.')
   if (!isRoom(mode) && !features.goLive) throw forbidden('Going live is turned off right now.')
+  // Going live and opening rooms is for women only (settings.hostApply.liveWomenOnly).
+  // Men can still watch, join rooms and send gifts. Hosts who are men are held to it too.
+  if (getConfig().settings.hostApply.liveWomenOnly && owner.gender === 'Male') {
+    throw new ApiError(403, 'women_only_live', isRoom(mode) ? 'Creating rooms is available to women only.' : 'Going live is available to women only.')
+  }
   if (mode === 'premium') {
     if (!features.premiumLive) throw forbidden('Premium lives are turned off right now.')
     if (!owner.host?.approved || owner.host.status !== 'active') throw forbidden('Only approved hosts can start a premium live.')
@@ -248,6 +253,12 @@ export async function joinLive(id, user) {
   }
   const owner = await User.findById(live.owner, { blocked: 1 })
   if (owner?.blocked?.some(b => same(b, uid))) throw forbidden('You can’t join this live.')
+  // Host lives need a minimum balance to enter (admin-set); rooms are open to all.
+  const min = getConfig().economy.minLiveBalance || 0
+  const watching = live.viewerIds.some(v => same(v, uid)) || live.guests.some(g => same(g.user, uid))
+  if (!isRoom(live.mode) && !watching && user.coins < min) {
+    throw new ApiError(402, 'insufficient_coins', `You need at least ${min} coins to join a live.`, { needed: min, balance: user.coins })
+  }
 
   // Premium: pay once per live. Claiming the ticket and paying share a
   // transaction, so a failed payment releases the claim and parallel joins
@@ -354,7 +365,7 @@ export async function sendChat(id, user, text) {
     toAdmins('moderation:flag', { kind: 'live_chat', liveId: sid(live._id), user: pub, text, keyword: mod.keyword })
     throw new ApiError(400, 'message_flagged', 'This message can’t be sent. Keep it friendly and safe.')
   }
-  const msg = { id: crypto.randomUUID(), kind: 'text', user: user._id, name: pub.name, photo: pub.photo, vip: pub.vip, text, at: new Date() }
+  const msg = { id: crypto.randomUUID(), kind: 'text', user: user._id, name: pub.name, photo: pub.photo, vip: pub.vip, frame: pub.senderTier?.color || '', text, at: new Date() }
   await Live.updateOne({ _id: live._id }, { $push: { chat: { $each: [msg], $slice: -CHAT_KEEP } } })
   const message = chatOut(msg)
   toLive(live._id, 'live:chat', { liveId: sid(live._id), message })
@@ -497,7 +508,7 @@ export async function recordLiveGift(liveId, fromUser, gift) {
   const coins = Number(gift?.coins) || 0
   const pub = from.toPublic()
   const g = { key: gift.key, name: gift.name, emoji: gift.emoji, coins, count: gift.count || 1, fullScreen: !!gift.fullScreen }
-  const msg = { id: crypto.randomUUID(), kind: 'gift', user: from._id, name: pub.name, photo: pub.photo, vip: pub.vip, gift: g, at: new Date() }
+  const msg = { id: crypto.randomUUID(), kind: 'gift', user: from._id, name: pub.name, photo: pub.photo, vip: pub.vip, frame: pub.senderTier?.color || '', gift: g, at: new Date() }
 
   const bumped = await Live.findOneAndUpdate(
     { _id: liveId, 'gifters.user': from._id },

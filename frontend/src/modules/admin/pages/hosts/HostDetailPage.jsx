@@ -28,13 +28,9 @@ import {
   Tabs,
   Who,
 } from '../../components/ui'
-import { ago, date, dateTime, duration, inr, label, ms, num } from '../../utils/format'
-
-const LEVEL_TONES = ['neutral', 'info', 'violet', 'warning']
-
-/** Level a host would have from call minutes alone. */
-const autoLevel = (levels, minutes) =>
-  levels.reduce((lv, l) => (minutes >= l.minutes ? l.level : lv), levels[0]?.level || 1)
+import { CategoryChip } from '../../components/LevelChips'
+import { categoryOf } from '../../utils/levels'
+import { ago, date, dateTime, duration, inr, label, ms, num, pct } from '../../utils/format'
 
 const capOf = (levels, level) => levels.find(l => l.level === level)?.maxRate ?? Infinity
 
@@ -92,8 +88,9 @@ function RatesModal({ open, host, tiers, cap, onClose, onSave }) {
   )
 }
 
-function LevelModal({ open, host, levels, onClose, onSave }) {
-  const auto = host.autoLevel ?? autoLevel(levels, host.callMinutes)
+function LevelModal({ open, host, levels, categories, onClose, onSave }) {
+  // The server's level from gift coins received (before any override).
+  const auto = host.autoLevel ?? host.level
   const [value, setValue] = useState(host.levelOverride ? String(host.level) : 'auto')
   const next = value === 'auto' ? auto : Number(value)
   const cap = capOf(levels, next)
@@ -113,13 +110,19 @@ function LevelModal({ open, host, levels, onClose, onSave }) {
       }
     >
       <div className="a-stack">
-        <Field label="Level" hint={`By call minutes (${num(host.callMinutes)} min) this host would be level ${auto}.`}>
+        <Field
+          label="Level"
+          hint={`By gift coins received${host.giftCoins != null ? ` (${num(host.giftCoins)})` : ''} this host would be level ${auto} (${categoryOf(categories, auto)?.name || '—'}).`}
+        >
           <Select
             value={value}
             onChange={e => setValue(e.target.value)}
             options={[
               { value: 'auto', label: `Automatic (level ${auto})` },
-              ...levels.map(l => ({ value: String(l.level), label: `Level ${l.level} override · max ${l.maxRate} coins/min` })),
+              ...levels.map(l => ({
+                value: String(l.level),
+                label: `Level ${l.level} override · ${categoryOf(categories, l.level)?.name || ''} · max ${l.maxRate} coins/min`,
+              })),
             ]}
           />
         </Field>
@@ -255,6 +258,8 @@ function HostDetail({ d, reload }) {
   const reports = d.reports.map(r => ({ ...r, ts: r.createdAt, reporter: { id: String(r.reporter), name: r.reporterName || 'User', avatar: null } }))
 
   const levels = db.config.hostLevels
+  const categories = db.config.hostCategories
+  const category = categoryOf(categories, h.level)
   const cap = capOf(levels, h.level)
   const agency = d.agency
   const close = () => setModal(null)
@@ -292,10 +297,7 @@ function HostDetail({ d, reload }) {
               <span className="a-row wrap" style={{ gap: 8, marginTop: 4, fontSize: 13, fontWeight: 600 }}>
                 <span className="a-mono a-muted">{h.id}</span>
                 <Status value={h.status} />
-                <Badge tone={LEVEL_TONES[h.level - 1]}>
-                  Level {h.level}
-                  {h.levelOverride ? ' · override' : ''}
-                </Badge>
+                <CategoryChip category={category} suffix={`· Lv ${h.level}${h.levelOverride ? ' · override' : ''}`} />
                 {h.status === 'active' ? <Status value={h.online ? 'online' : 'offline'} /> : null}
               </span>
             </span>
@@ -339,9 +341,11 @@ function HostDetail({ d, reload }) {
       <div className="a-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', marginBottom: 20 }}>
         <Stat label="Lifetime earned" value={inr(h.lifetime)} sub="net of commission" />
         <Stat label="Available" value={inr(h.available)} icon={IndianRupee} sub={`${inr(paidOut)} paid out`} />
+        {/* TODO(api): GET /admin/hosts/:id → host.giftCoins (lifetime gift coins received, what the level is based on). Shown once sent. */}
+        {h.giftCoins != null ? <Stat label="Gift coins received" value={num(h.giftCoins)} sub={`level ${h.level}${category ? ` · ${category.name}` : ''}`} /> : null}
         <Stat label="Call minutes" value={num(h.callMinutes)} sub={`${num(calls.length)} recent calls`} />
-        <Stat label="Rating" value={Number(h.rating || 0).toFixed(1)} icon={Star} sub={`${num(h.ratingCount)} ratings`} />
-        {/* TODO(api): answer rate and followers aren't returned by GET /admin/hosts/:id; showing last-30-day earnings instead. */}
+        <Stat label="Rating" value={Number(h.rating || 0).toFixed(1)} icon={Star} sub={`${num(h.followers)} followers · ${num(h.ratingCount)} ratings`} />
+        <Stat label="Answer rate" value={h.answerRate == null ? '—' : pct(h.answerRate)} sub={h.answerRate == null ? 'no calls rang in 30 days' : 'of calls that rang · 30 days'} />
         <Stat label="Last 30 days" value={inr(d.earnings.last30)} sub={d.balance.onHold ? `${inr(d.balance.onHold)} on hold` : 'net earnings'} />
       </div>
 
@@ -379,6 +383,8 @@ function HostDetail({ d, reload }) {
                 <dd>
                   {date(h.joined)} <span className="a-muted">· {ago(h.joined)}</span>
                 </dd>
+                <dt>ID</dt>
+                <dd>{h.idType ? `${h.idType} ····${h.idLast4 || ''}` : '—'}</dd>
                 <dt>Payout</dt>
                 <dd>{d.payoutMethods.map(m => m.label).join(', ') || '—'}</dd>
                 <dt>Verified</dt>
@@ -402,7 +408,7 @@ function HostDetail({ d, reload }) {
           <div className="a-stack">
             <Card
               title="Call prices"
-              subtitle={`Level ${h.level} cap: ${cap} coins/min`}
+              subtitle={`Level ${h.level}${category ? ` · ${category.name}` : ''} cap: ${cap} coins/min`}
               actions={
                 <Button size="sm" icon={Pencil} onClick={() => setModal('rates')}>
                   Edit
@@ -415,8 +421,8 @@ function HostDetail({ d, reload }) {
                 <dt>Voice</dt>
                 <dd>{h.rates.voice} coins/min</dd>
                 <dt>Level</dt>
-                <dd className="a-row" style={{ gap: 8 }}>
-                  Level {h.level}
+                <dd className="a-row wrap" style={{ gap: 8 }}>
+                  <CategoryChip category={category} suffix={`· Lv ${h.level}${h.levelOverride ? ' · override' : ''}`} />
                   <Button size="sm" variant="ghost" icon={Layers} onClick={() => setModal('level')}>
                     Change
                   </Button>
@@ -618,6 +624,7 @@ function HostDetail({ d, reload }) {
         open={modal === 'level'}
         host={h}
         levels={levels}
+        categories={categories}
         onClose={close}
         onSave={levelOverride =>
           run(() => api.patch(`/admin/hosts/${id}`, { levelOverride }), levelOverride ? `Level set to ${levelOverride}` : 'Level set to automatic')

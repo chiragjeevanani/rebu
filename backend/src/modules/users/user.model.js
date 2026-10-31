@@ -1,4 +1,19 @@
 import mongoose from 'mongoose'
+import { getConfig } from '../config/config.service.js'
+
+/** Category of a host level, e.g. { key: 'iron', name: 'Iron', color }. */
+export function hostCategoryOf(level) {
+  const { hostLevels, hostCategories } = getConfig()
+  const key = hostLevels.find(l => l.level === level)?.category || hostCategories[0]?.key
+  const c = hostCategories.find(x => x.key === key) || hostCategories[0]
+  return c ? { key: c.key, name: c.name, color: c.color } : null
+}
+
+/** Sender frame tier for lifetime coins bought (null below the first paid tier). */
+export function senderTierOf(coinsBought = 0) {
+  const t = [...getConfig().senderTiers].reverse().find(x => coinsBought >= x.minCoins)
+  return t && t.minCoins > 0 ? { key: t.key, name: t.name, color: t.color } : null
+}
 
 const { Schema } = mongoose
 
@@ -12,9 +27,11 @@ const hostSchema = new Schema(
     levelOverride: { type: Number, default: null },
     rates: { video: { type: Number, default: 40 }, voice: { type: Number, default: 20 } },
     online: { type: Boolean, default: false },
-    busy: { type: Boolean, default: false },
+    busy: { type: Boolean, default: false }, // true when all call slots are taken
+    calls: { type: Number, default: 0 }, // ringing + connected calls right now
     agencyId: { type: Schema.Types.ObjectId, ref: 'Agency', default: null },
     callMinutes: { type: Number, default: 0 },
+    giftCoins: { type: Number, default: 0 }, // lifetime gift coins received → level
     rating: { type: Number, default: 5 },
     ratingCount: { type: Number, default: 0 },
     displayName: String,
@@ -40,6 +57,7 @@ const userSchema = new Schema(
     profileDone: { type: Boolean, default: false },
     coins: { type: Number, default: 0, min: 0 },
     spent: { type: Number, default: 0 }, // ₹ lifetime purchases
+    coinsBought: { type: Number, default: 0 }, // lifetime coins bought (incl. pack bonus) → sender frame
     vip: { level: { type: Number, default: 0 }, until: Date },
     royal: { key: String, until: Date }, // royal club (crowns)
     // Store items in use (item ids from config.storeItems); ownership is in UserItem.
@@ -72,6 +90,7 @@ userSchema.methods.toSelf = function () {
   delete o.notes
   delete o.blocked
   o.id = String(o._id)
+  o.senderTier = senderTierOf(this.coinsBought)
   return o
 }
 
@@ -96,9 +115,11 @@ userSchema.methods.toPublic = function () {
     frame: this.equipped?.frame || null,
     familyId: this.familyId ? String(this.familyId) : null,
     isHost: !!h,
+    senderTier: senderTierOf(this.coinsBought),
     host: h
       ? {
           level: h.levelOverride || h.level,
+          category: hostCategoryOf(h.levelOverride || h.level),
           rates: h.rates,
           online: h.online && !h.busy,
           busy: h.busy,

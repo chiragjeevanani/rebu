@@ -80,7 +80,7 @@ export default function IncomingCallScreen({ navigation, route }) {
         <Txt style={styles.kicker}>
           Incoming {caller.video ? 'video' : 'voice'} call
         </Txt>
-        <Avatar uri={caller.photo} size={140} ring />
+        <Avatar uri={caller.photo} size={140} ring frame={caller.senderTier} />
         <Txt style={styles.name}>
           {caller.name}
           {caller.age ? `, ${caller.age}` : ''}

@@ -2,9 +2,10 @@ import { Router } from 'express'
 import mongoose from 'mongoose'
 import { z } from 'zod'
 import { ah, paged, paging, parse } from '../../core/http.js'
-import { badRequest, conflict, forbidden, notFound } from '../../core/errors.js'
+import { ApiError, badRequest, conflict, forbidden, notFound } from '../../core/errors.js'
 import { requireHost } from '../../core/auth.js'
-import { User } from '../users/user.model.js'
+import { User, hostCategoryOf } from '../users/user.model.js'
+import { hostTargetRoutes } from './targets.js'
 import { Live } from '../lives/live.model.js'
 import { Agency, HostApplication, PayoutMethod } from './hosts.models.js'
 import { Dispute, Earning, Withdrawal } from '../earnings/earnings.models.js'
@@ -93,6 +94,11 @@ hostRoutes.post(
     // The app currently sends `agency`; accept it as an alias.
     const body = { ...req.body, agencyCode: req.body?.agencyCode ?? req.body?.agency }
     const data = parse(applicationSchema(), body)
+    // Hosting is open to women only (settings.hostApply.womenOnly). The profile
+    // gender has to match too, so the form can't simply claim it.
+    if (settings.hostApply.womenOnly && (data.gender !== 'Female' || (req.user.gender && req.user.gender !== 'Female'))) {
+      throw new ApiError(403, 'women_only', 'Hosting on REBU is open to women only.')
+    }
     if (ageOn(data.dob) < settings.hostApply.minAge) throw badRequest(`You must be ${settings.hostApply.minAge} or older to host.`)
     checkRates(data.rates, 1)
 
@@ -119,6 +125,7 @@ hostRoutes.get(
 
 // Everything below is the approved host's own center.
 hostRoutes.use(requireHost)
+hostRoutes.use(hostTargetRoutes) // /targets, /targets/:id/claim
 
 // ---- Host center --------------------------------------------------------------
 
@@ -130,12 +137,13 @@ hostRoutes.get(
     const u = req.user
     const { hostLevels } = getConfig()
     const level = hostLevel(u.host)
-    // Keep the stored level (used by toPublic) in step with minutes.
+    // Keep the stored level (used by toPublic) in step with gift coins.
     if (!u.host.levelOverride && u.host.level !== level) {
       await User.updateOne({ _id: u._id }, { $set: { 'host.level': level } })
       u.host.level = level
     }
     const minutes = u.host.callMinutes || 0
+    const gifts = u.host.giftCoins || 0
     const nextL = hostLevels.find(l => l.level > level)
     const curL = hostLevels.find(l => l.level === level) || hostLevels[0]
 
@@ -169,17 +177,21 @@ hostRoutes.get(
       name: u.host.displayName || u.name,
       agency: agencyOut(agency),
       level,
-      levels: hostLevels.map(l => ({ ...l, reached: minutes >= l.minutes || l.level <= level, current: l.level === level })),
+      levels: hostLevels.map(l => ({ ...l, reached: l.level <= level, current: l.level === level })),
+      category: hostCategoryOf(level),
+      categories: getConfig().hostCategories,
       maxRate: curL.maxRate,
       next: nextL
         ? {
             level: nextL.level,
-            minutes: nextL.minutes,
-            remaining: Math.max(0, nextL.minutes - minutes),
-            progress: Math.min(1, (minutes - curL.minutes) / Math.max(1, nextL.minutes - curL.minutes)),
+            giftCoins: nextL.giftCoins,
+            remaining: Math.max(0, nextL.giftCoins - gifts),
+            progress: Math.min(1, Math.max(0, (gifts - curL.giftCoins) / Math.max(1, nextL.giftCoins - curL.giftCoins))),
             maxRate: nextL.maxRate,
+            category: hostCategoryOf(nextL.level),
           }
         : null,
+      giftCoins: gifts,
       callMinutes: minutes,
       balance,
       today: {

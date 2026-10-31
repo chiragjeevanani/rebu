@@ -1,7 +1,8 @@
 // REBU design tokens: neutral, flat UI with a single raspberry accent.
 
 export const colors = {
-  // One flat accent (raspberry, from the REBU logo) on a neutral white UI.
+  // One flat accent (raspberry, from the REBU logo) on a light lavender UI
+  // (client request); cards and sheets stay white on top of it.
   // Gradient keys are kept for compatibility but are solid on purpose.
   primary: '#D81B60',
   primaryDark: '#AD1457',
@@ -12,7 +13,7 @@ export const colors = {
   gradientWarm: ['#D81B60', '#D81B60'],
   gradientGold: ['#F5B301', '#F5B301'],
 
-  background: '#FFFFFF',
+  background: '#F3EEFB',
   surface: '#FFFFFF',
   surfaceAlt: '#F4F4F6',
   surfaceMuted: '#F2F2F4',

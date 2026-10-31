@@ -6,6 +6,7 @@ import { initRealtime } from './core/realtime.js'
 import { callSocketHooks } from './modules/calls/calls.service.js'
 import { rejoinLiveRooms } from './modules/lives/lives.service.js'
 import { createApp } from './app.js'
+import './modules/users/backfill.js'
 import { startupHooks, shutdownHooks } from './hooks.js'
 
 await connectDb()

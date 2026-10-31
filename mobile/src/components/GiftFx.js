@@ -1,4 +1,9 @@
-// Full-screen animations for premium gifts (999+ coins). Each gift has its own scene.
+// Gift animations, played over whatever is on screen (the call or live video
+// stays visible underneath and keeps taking touches):
+//   dim + sparkle burst → the gift's Lottie pops in → sender banner slides in
+//   (with a combo counter for repeats) → everything fades out.
+// Luxury gifts (999+ coins) play larger, with rotating light rays behind.
+// Gifts that arrive together queue up and play in turn.
 import React, {
   createContext,
   useCallback,
@@ -9,677 +14,550 @@ import React, {
   useState,
 } from 'react';
 import {
-  Modal,
-  Pressable,
+  Image,
   StyleSheet,
   Text,
   View,
   useWindowDimensions,
 } from 'react-native';
+import LottieView from 'lottie-react-native';
 import Svg, { Path } from 'react-native-svg';
 import Animated, {
   Easing,
-  Extrapolation,
   interpolate,
   useAnimatedStyle,
   useSharedValue,
   withDelay,
   withRepeat,
+  withSequence,
+  withSpring,
   withTiming,
 } from 'react-native-reanimated';
+import { useApp } from '../context/AppContext';
+import { API_URL } from '../api/client';
 import { colors, fonts } from '../theme';
 
+// Gifts at this price and up are "luxury": tagged FX in the sheet and played larger.
 export const BIG_GIFT_COINS = 999;
 
-const DURATION = { car: 4000, yacht: 4400, castle: 4600, rocket: 4400 };
+const MAX_QUEUE = 6;
+// Safety net if a Lottie never reports it finished (bad file, network).
+const MAX_PLAY_MS = 6500;
+const EMOJI_MS = 2400;
+// Short clips loop until the gift has been on screen at least this long.
+const MIN_PLAY_MS = 2800;
+const MIN_PLAY_BIG_MS = 4800;
+const EXIT_MS = 380;
+// The same sender repeating the same gift within this window bumps a combo.
+const COMBO_MS = 4000;
+
+const SPARK_COLORS = ['#FFD54F', '#FF7BAC', '#FFFFFF', '#B388FF', '#7EE0FF'];
 
 const GiftFxContext = createContext({ play: () => {} });
 export const useGiftFx = () => useContext(GiftFxContext);
 
-/** 0 → 1 over `duration` ms, starting after `delay`. */
-function useProgress(duration, delay = 0, easing = Easing.linear) {
-  const p = useSharedValue(0);
-  useEffect(() => {
-    p.value = withDelay(delay, withTiming(1, { duration, easing }));
-  }, [p, duration, delay, easing]);
-  return p;
+// Animations downloaded ahead of time (url → Lottie JSON), so a gift plays
+// the moment it's sent instead of after a download.
+const preloaded = new Map();
+function preload(url) {
+  if (!url || preloaded.has(url)) return;
+  preloaded.set(url, null);
+  fetch(url)
+    .then(r => (r.ok ? r.json() : Promise.reject(r.status)))
+    .then(j => preloaded.set(url, j))
+    .catch(() => preloaded.delete(url));
 }
 
-/** Repeating 0 → 1 loop (waves, flicker, twinkle). */
-function useLoop(period, delay = 0) {
+const absolute = url =>
+  !url ? null : /^https?:\/\//.test(url) ? url : `${API_URL}${url}`;
+
+/* ---------- pieces ---------- */
+
+function Spark({ i, count, radius, p, color }) {
+  // Jittered angle and reach so the burst scatters instead of forming a ring.
+  const angle = (i / count) * Math.PI * 2 + (((i * 29) % 21) - 10) / 40;
+  const reach = radius * (0.55 + ((i * 53) % 46) / 100);
+  const size = 9 + ((i * 7) % 9);
+  const style = useAnimatedStyle(() => ({
+    opacity: interpolate(p.value, [0, 0.08, 0.65, 1], [0, 1, 1, 0]),
+    transform: [
+      { translateX: Math.cos(angle) * reach * p.value },
+      {
+        translateY: Math.sin(angle) * reach * p.value + 50 * p.value * p.value,
+      },
+      { scale: interpolate(p.value, [0, 0.2, 1], [0.2, 1, 0.5]) },
+      { rotate: `${p.value * 180}deg` },
+    ],
+  }));
+  return (
+    <Animated.View
+      style={[
+        styles.spark,
+        {
+          width: size,
+          height: size,
+          borderRadius: i % 3 === 0 ? 1 : size / 2,
+          backgroundColor: color,
+        },
+        style,
+      ]}
+    />
+  );
+}
+
+function Burst({ count, radius, delay = 0 }) {
   const p = useSharedValue(0);
   useEffect(() => {
     p.value = withDelay(
       delay,
-      withRepeat(
-        withTiming(1, { duration: period, easing: Easing.linear }),
-        -1,
-        false,
-      ),
+      withTiming(1, { duration: 1300, easing: Easing.out(Easing.cubic) }),
     );
-  }, [p, period, delay]);
-  return p;
-}
-
-const lerp = (p, input, output) => {
-  'worklet';
-  return interpolate(p, input, output, Extrapolation.CLAMP);
-};
-
-function Emoji({ children, size, style }) {
+  }, [p, delay]);
   return (
-    <Animated.Text style={[{ fontSize: size, lineHeight: size * 1.2 }, style]}>
-      {children}
-    </Animated.Text>
-  );
-}
-
-/* ---------- Firework / confetti burst ---------- */
-function Burst({ x, y, delay = 0, count = 14, radius = 120, color, glyph }) {
-  const p = useProgress(1100, delay, Easing.out(Easing.cubic));
-  return (
-    <View pointerEvents="none" style={[styles.abs, { left: x, top: y }]}>
+    <View style={styles.center} pointerEvents="none">
       {Array.from({ length: count }).map((_, i) => (
-        <Particle
+        <Spark
           key={i}
-          p={p}
           i={i}
           count={count}
           radius={radius}
-          color={color}
-          glyph={glyph}
+          p={p}
+          color={SPARK_COLORS[i % SPARK_COLORS.length]}
         />
       ))}
     </View>
   );
 }
 
-function Particle({ p, i, count, radius, color, glyph }) {
-  // Jitter angle and reach so bursts scatter instead of forming a perfect ring.
-  const angle = (i / count) * Math.PI * 2 + (((i * 29) % 21) - 10) / 40;
-  const reach = radius * (0.55 + ((i * 53) % 46) / 100);
-  const style = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0, 0.05, 0.7, 1], [0, 1, 1, 0]),
-    transform: [
-      { translateX: Math.cos(angle) * reach * p.value },
-      // A little gravity pulls particles down as they fade.
-      {
-        translateY: Math.sin(angle) * reach * p.value + 40 * p.value * p.value,
-      },
-      { scale: lerp(p.value, [0, 0.2, 1], [0.3, 1, 0.6]) },
-    ],
-  }));
-  if (glyph) {
-    return (
-      <Animated.Text style={[styles.particleGlyph, style]}>
-        {glyph}
-      </Animated.Text>
+/* Soft rings pulsing out from behind the gift. */
+function Pulse({ size, delay, color }) {
+  const p = useSharedValue(0);
+  useEffect(() => {
+    p.value = withDelay(
+      delay,
+      withRepeat(
+        withTiming(1, { duration: 1600, easing: Easing.out(Easing.quad) }),
+        3,
+      ),
     );
-  }
+  }, [p, delay]);
+  const style = useAnimatedStyle(() => ({
+    opacity: interpolate(p.value, [0, 0.15, 1], [0, 0.7, 0]),
+    transform: [{ scale: 0.35 + p.value * 0.9 }],
+  }));
   return (
     <Animated.View
-      style={[styles.particle, { backgroundColor: color }, style]}
+      style={[
+        styles.abs,
+        styles.ring,
+        {
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          borderColor: color,
+        },
+        style,
+      ]}
     />
   );
 }
 
-/* Night-city silhouette behind the road. */
-function Skyline({ w, bottom }) {
-  const blocks = [];
-  for (let x = -10, i = 0; x < w; i++) {
-    const bw = 50 + ((i * 37) % 50);
-    const bh = 90 + ((i * 71) % 160);
-    blocks.push({ x, bw, bh, i });
-    x += bw + 4;
-  }
-  return (
-    <>
-      {blocks.map(b => (
-        <View
-          key={b.i}
-          style={[
-            styles.building,
-            { left: b.x, width: b.bw, height: b.bh, bottom },
-          ]}
-        >
-          {Array.from({
-            length: Math.floor((b.bw - 10) / 12) * Math.floor((b.bh - 10) / 16),
-          }).map((_, j) => (
-            <View
-              key={j}
-              style={[
-                styles.window,
-                (j * 7 + b.i) % 3 === 0 && styles.windowLit,
-              ]}
-            />
-          ))}
-        </View>
-      ))}
-    </>
-  );
-}
-
-/* ---------- Sports Car: races in, revs, speeds off ---------- */
-function CarScene({ w, h }) {
-  const p = useProgress(DURATION.car);
-  const lanes = useLoop(380);
-  const roadY = h * 0.56;
-
-  const car = useAnimatedStyle(() => {
-    const x = lerp(
-      p.value,
-      [0, 0.3, 0.68, 1],
-      [w + 40, w / 2 - 95, w / 2 - 95, -w - 260],
+/* Copies of the gift's emoji drifting up the screen, like stream reactions. */
+function Floater({ emoji, i, w, h, big }) {
+  const p = useSharedValue(0);
+  const x = w * (0.08 + ((i * 37) % 84) / 100);
+  const size = (big ? 30 : 24) + ((i * 11) % 16);
+  const sway = 14 + ((i * 13) % 22);
+  useEffect(() => {
+    p.value = withDelay(
+      ((i * 173) % 1100) + 150,
+      withTiming(1, {
+        duration: 2100 + ((i * 97) % 900),
+        easing: Easing.out(Easing.quad),
+      }),
     );
-    const shake =
-      p.value > 0.3 && p.value < 0.68 ? Math.sin(p.value * 260) * 2.5 : 0;
-    return { transform: [{ translateX: x }, { translateY: shake }] };
-  });
-  const lanesStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: -lanes.value * 120 }],
-  }));
-  const speedLines = useAnimatedStyle(() => ({
-    opacity: lerp(
-      p.value,
-      [0, 0.08, 0.3, 0.36, 0.66, 0.72, 0.95],
-      [0, 1, 1, 0, 0, 1, 0],
-    ),
-  }));
-  const smoke = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0.28, 0.36, 0.6, 0.7], [0, 1, 1, 0]),
+  }, [p, i]);
+  const style = useAnimatedStyle(() => ({
+    opacity: interpolate(p.value, [0, 0.12, 0.7, 1], [0, 1, 0.9, 0]),
     transform: [
-      { translateX: lerp(p.value, [0.28, 0.7], [0, 60]) },
-      { scale: lerp(p.value, [0.28, 0.7], [0.6, 1.4]) },
+      { translateX: x + Math.sin(p.value * Math.PI * 3 + i) * sway },
+      { translateY: h * (0.92 - p.value * 0.62) },
+      { scale: interpolate(p.value, [0, 0.2, 1], [0.4, 1, 0.8]) },
+      { rotate: `${Math.sin(p.value * 6 + i) * 18}deg` },
     ],
   }));
-  const title = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0.32, 0.38, 0.62, 0.7], [0, 1, 1, 0]),
-    transform: [{ scale: lerp(p.value, [0.32, 0.4], [0.4, 1]) }],
-  }));
-
   return (
-    <View style={[StyleSheet.absoluteFill, styles.carBg]}>
-      <Skyline w={w} bottom={h - roadY} />
-      <View style={[styles.road, { top: roadY }]}>
-        <Animated.View style={[styles.lanes, lanesStyle]}>
-          {Array.from({ length: Math.ceil(w / 120) + 3 }).map((_, i) => (
-            <View key={i} style={styles.lane} />
-          ))}
-        </Animated.View>
-      </View>
-      <Animated.View
-        style={[styles.abs, { top: roadY - 70, left: 0, right: 0 }, speedLines]}
-      >
-        {[0, 1, 2, 3].map(i => (
-          <View
-            key={i}
-            style={[
-              styles.speedLine,
-              { top: i * 26, left: 30 + i * 50, width: 110 + i * 30 },
-            ]}
-          />
-        ))}
-      </Animated.View>
-      <Animated.View style={[styles.abs, { top: roadY - 120, left: 0 }, car]}>
-        <Emoji size={150}>🏎️</Emoji>
-      </Animated.View>
-      <Animated.View
-        style={[styles.abs, { top: roadY - 60, left: w / 2 + 60 }, smoke]}
-      >
-        <Emoji size={56}>💨</Emoji>
-      </Animated.View>
-      <Animated.Text style={[styles.fxTitle, { top: h * 0.32 }, title]}>
-        VROOM!
-      </Animated.Text>
-    </View>
+    <Animated.Text
+      style={[
+        styles.floater,
+        { fontSize: size, lineHeight: size * 1.2 },
+        style,
+      ]}
+    >
+      {emoji}
+    </Animated.Text>
   );
 }
 
-/* ---------- Yacht: sails across a sunny sea ---------- */
-function Wave({ w, top, color, period, amp, delay }) {
-  const loop = useLoop(period, delay);
-  const width = w * 2;
+/* Rotating light rays behind luxury gifts (flat, translucent wedges). */
+function Rays({ size }) {
+  const spin = useSharedValue(0);
+  const show = useSharedValue(0);
+  useEffect(() => {
+    show.value = withTiming(1, { duration: 500 });
+    spin.value = withRepeat(
+      withTiming(1, { duration: 9000, easing: Easing.linear }),
+      -1,
+    );
+  }, [spin, show]);
   const style = useAnimatedStyle(() => ({
-    transform: [{ translateX: -loop.value * w }],
+    opacity: show.value * 0.9,
+    transform: [{ rotate: `${spin.value * 360}deg` }, { scale: show.value }],
   }));
-  let d = `M0 ${amp}`;
-  for (let x = 0; x <= width; x += 60) {
-    d += ` Q ${x + 30} ${x % 120 === 0 ? 0 : amp * 2} ${x + 60} ${amp}`;
-  }
-  d += ` L ${width} 400 L 0 400 Z`;
+  const r = size / 2;
+  const wedges = 14;
+  const d = Array.from({ length: wedges })
+    .map((_, i) => {
+      const a = (i / wedges) * Math.PI * 2;
+      const b = a + Math.PI / wedges / 1.6;
+      return `M${r} ${r} L${r + Math.cos(a) * r} ${r + Math.sin(a) * r} L${
+        r + Math.cos(b) * r
+      } ${r + Math.sin(b) * r} Z`;
+    })
+    .join(' ');
   return (
-    <Animated.View style={[styles.abs, { top, left: 0, width }, style]}>
-      <Svg width={width} height={400}>
-        <Path d={d} fill={color} />
+    <Animated.View
+      style={[styles.abs, { width: size, height: size }, style]}
+      pointerEvents="none"
+    >
+      <Svg width={size} height={size}>
+        <Path d={d} fill="rgba(255,236,170,0.22)" />
       </Svg>
     </Animated.View>
   );
 }
 
-function YachtScene({ w, h }) {
-  const p = useProgress(DURATION.yacht);
-  const bob = useLoop(1400);
-  const sea = h * 0.55;
-
-  const yacht = useAnimatedStyle(() => ({
-    transform: [
-      {
-        translateX: lerp(
-          p.value,
-          [0, 0.35, 0.7, 1],
-          [w + 20, w / 2 - 85, w / 2 - 105, -w - 200],
-        ),
-      },
-      { translateY: Math.sin(bob.value * Math.PI * 2) * 8 },
-      { rotate: `${Math.sin(bob.value * Math.PI * 2 + 1) * 4}deg` },
-    ],
-  }));
-  const gulls = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: lerp(p.value, [0, 1], [-80, w + 40]) },
-      { translateY: Math.sin(p.value * 18) * 10 },
-    ],
-  }));
-  const title = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0.35, 0.42, 0.68, 0.76], [0, 1, 1, 0]),
-    transform: [{ scale: lerp(p.value, [0.35, 0.45], [0.5, 1]) }],
-  }));
-
+function EmojiArt({ emoji, size }) {
   return (
-    <View style={[StyleSheet.absoluteFill, styles.skyDay]}>
-      <Text style={[styles.abs, styles.sun]}>☀️</Text>
-      <Animated.View style={[styles.abs, { top: h * 0.2 }, gulls]}>
-        <Text style={styles.gulls}>🕊️ 🕊️</Text>
-      </Animated.View>
-      <Wave
-        w={w}
-        top={sea + 30}
-        color="#2A7AB8"
-        period={3200}
-        amp={14}
-        delay={0}
-      />
-      <Animated.View style={[styles.abs, { top: sea - 110, left: 0 }, yacht]}>
-        <Emoji size={150}>🛥️</Emoji>
-      </Animated.View>
-      <Wave
-        w={w}
-        top={sea + 70}
-        color="#1D5F94"
-        period={2400}
-        amp={18}
-        delay={200}
-      />
-      <Animated.Text
-        style={[styles.fxTitle, styles.fxTitleDark, { top: h * 0.3 }, title]}
-      >
-        Bon voyage!
-      </Animated.Text>
-    </View>
+    <Text style={{ fontSize: size * 0.55, lineHeight: size * 0.7 }}>
+      {emoji}
+    </Text>
   );
 }
 
-/* ---------- Castle: rises at night, crown lands, fireworks ---------- */
-function Star({ x, y, delay }) {
-  const t = useLoop(1600, delay);
-  const style = useAnimatedStyle(() => ({
-    opacity: 0.25 + 0.75 * Math.abs(Math.sin(t.value * Math.PI)),
+/* Sender banner: slides in from the left; the combo pill pops on each repeat. */
+function Banner({ item, leaving }) {
+  const x = useSharedValue(-1);
+  const pop = useSharedValue(1);
+  useEffect(() => {
+    x.value = withSpring(0, { damping: 15, stiffness: 140 });
+  }, [x]);
+  useEffect(() => {
+    if (leaving) x.value = withTiming(-1, { duration: EXIT_MS });
+  }, [leaving, x]);
+  useEffect(() => {
+    if (item.combo > 1) {
+      pop.value = withSequence(
+        withTiming(1.6, { duration: 120 }),
+        withSpring(1, { damping: 6 }),
+      );
+    }
+  }, [item.combo, pop]);
+  const slide = useAnimatedStyle(() => ({
+    opacity: 1 + x.value,
+    transform: [{ translateX: x.value * 320 }],
   }));
-  return <Animated.View style={[styles.star, { left: x, top: y }, style]} />;
-}
-
-function CastleScene({ w, h }) {
-  const p = useProgress(DURATION.castle);
-  const stars = useMemo(
-    () =>
-      Array.from({ length: 26 }, (_, i) => ({
-        x: (i * 97) % w,
-        y: ((i * 53) % (h * 0.45)) + 20,
-        d: (i * 130) % 1600,
-      })),
-    [w, h],
-  );
-  const castle = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0, 0.1], [0, 1]),
-    transform: [
-      { translateY: lerp(p.value, [0, 0.3], [260, 0]) },
-      { scale: lerp(p.value, [0.25, 0.32, 0.38], [1, 1.06, 1]) },
-    ],
+  const popStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: pop.value }],
   }));
-  const crown = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0.35, 0.4], [0, 1]),
-    transform: [
-      { translateY: lerp(p.value, [0.35, 0.5], [-h * 0.5, 0]) },
-      { rotate: `${lerp(p.value, [0.35, 0.5], [-30, 0])}deg` },
-    ],
-  }));
-  const title = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0.52, 0.58, 0.9, 1], [0, 1, 1, 0]),
-    transform: [{ scale: lerp(p.value, [0.52, 0.6], [0.5, 1]) }],
-  }));
-  const base = h * 0.42;
-  const D = DURATION.castle;
-
+  const { gift, from, to, photo } = item;
+  const mine = !from || from === 'You';
   return (
-    <View style={[StyleSheet.absoluteFill, styles.night]}>
-      {stars.map((s, i) => (
-        <Star key={i} x={s.x} y={s.y} delay={s.d} />
-      ))}
-      <Text style={[styles.abs, styles.moon]}>🌙</Text>
-      <Animated.View
-        style={[styles.abs, styles.centerX, { top: base }, castle]}
-      >
-        <Emoji size={200}>🏰</Emoji>
-      </Animated.View>
-      <Animated.View
-        style={[styles.abs, styles.centerX, { top: base - 70 }, crown]}
-      >
-        <Emoji size={80}>👑</Emoji>
-      </Animated.View>
-      <Burst x={w * 0.2} y={h * 0.22} delay={D * 0.5} color="#FFD54F" />
-      <Burst x={w * 0.8} y={h * 0.18} delay={D * 0.58} color="#FF8FB8" />
-      <Burst
-        x={w * 0.5}
-        y={h * 0.12}
-        delay={D * 0.66}
-        color="#80DEEA"
-        radius={150}
-      />
-      <Burst x={w * 0.3} y={h * 0.3} delay={D * 0.74} color="#FFFFFF" />
-      <Burst x={w * 0.72} y={h * 0.3} delay={D * 0.8} color="#FFD54F" />
-      <Animated.Text style={[styles.fxTitle, { top: base + 250 }, title]}>
-        Royal welcome!
-      </Animated.Text>
-    </View>
-  );
-}
-
-/* ---------- Rocket: countdown shake, launch, starburst ---------- */
-function StreakStar({ x, speed, h, delay }) {
-  const t = useLoop(speed, delay);
-  const style = useAnimatedStyle(() => ({
-    transform: [{ translateY: -40 + t.value * (h + 80) }],
-  }));
-  return <Animated.View style={[styles.streak, { left: x }, style]} />;
-}
-
-function RocketScene({ w, h }) {
-  const p = useProgress(DURATION.rocket);
-  const flicker = useLoop(140);
-  const streaks = useMemo(
-    () =>
-      Array.from({ length: 18 }, (_, i) => ({
-        x: (i * 61) % w,
-        s: 500 + ((i * 137) % 600),
-        d: (i * 90) % 700,
-      })),
-    [w],
-  );
-  const pad = h * 0.62;
-
-  const rocket = useAnimatedStyle(() => {
-    const shake =
-      p.value < 0.3
-        ? Math.sin(p.value * 320) * lerp(p.value, [0, 0.3], [1, 5])
-        : 0;
-    return {
-      transform: [
-        { translateX: shake },
-        { translateY: lerp(p.value, [0, 0.3, 0.72], [0, 0, -h * 0.95]) },
-      ],
-    };
-  });
-  const flame = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0.1, 0.2], [0, 1]),
-    transform: [
-      { scaleY: 0.8 + 0.4 * Math.abs(Math.sin(flicker.value * Math.PI)) },
-      { rotate: '180deg' },
-    ],
-  }));
-  const smoke = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0.05, 0.25, 0.6, 0.8], [0, 1, 1, 0]),
-    transform: [{ scale: lerp(p.value, [0.05, 0.6], [0.4, 1.6]) }],
-  }));
-  const space = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0.3, 0.4], [0, 1]),
-  }));
-  const title = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0.74, 0.8, 0.95, 1], [0, 1, 1, 0]),
-    transform: [{ scale: lerp(p.value, [0.74, 0.82], [0.5, 1]) }],
-  }));
-  const countdown = useAnimatedStyle(() => ({
-    opacity: lerp(p.value, [0, 0.04, 0.26, 0.3], [0, 1, 1, 0]),
-  }));
-  const D = DURATION.rocket;
-
-  return (
-    <View style={[StyleSheet.absoluteFill, styles.space]}>
-      <Animated.View style={[StyleSheet.absoluteFill, space]}>
-        {streaks.map((s, i) => (
-          <StreakStar key={i} x={s.x} speed={s.s} h={h} delay={s.d} />
-        ))}
-      </Animated.View>
-      <Animated.Text style={[styles.fxTitle, { top: h * 0.3 }, countdown]}>
-        3 · 2 · 1
-      </Animated.Text>
-      <Animated.View
-        style={[styles.abs, styles.centerX, { top: pad + 40 }, smoke]}
-      >
-        <Text style={styles.smoke}>☁️☁️☁️</Text>
-      </Animated.View>
-      <Animated.View
-        style={[styles.abs, styles.centerX, { top: pad - 120 }, rocket]}
-      >
-        <Emoji size={140} style={styles.rocketTilt}>
-          🚀
-        </Emoji>
-        <Animated.Text style={[styles.flame, flame]}>🔥</Animated.Text>
-      </Animated.View>
-      <Burst
-        x={w / 2}
-        y={h * 0.2}
-        delay={D * 0.7}
-        count={18}
-        radius={170}
-        glyph="⭐"
-      />
-      <Burst
-        x={w / 2}
-        y={h * 0.2}
-        delay={D * 0.72}
-        count={16}
-        radius={110}
-        color="#FFD54F"
-      />
-      <Burst x={w * 0.25} y={h * 0.32} delay={D * 0.78} glyph="✨" count={10} />
-      <Burst x={w * 0.75} y={h * 0.32} delay={D * 0.8} glyph="🎉" count={10} />
-      <Animated.Text style={[styles.fxTitle, { top: h * 0.42 }, title]}>
-        To the moon!
-      </Animated.Text>
-    </View>
-  );
-}
-
-const SCENES = {
-  car: CarScene,
-  yacht: YachtScene,
-  castle: CastleScene,
-  rocket: RocketScene,
-};
-
-/* ---------- Banner: who sent what ---------- */
-function Caption({ gift, to }) {
-  const p = useProgress(500, 100, Easing.out(Easing.back(1.5)));
-  const style = useAnimatedStyle(() => ({
-    opacity: p.value,
-    transform: [{ translateY: lerp(p.value, [0, 1], [-30, 0]) }],
-  }));
-  return (
-    <Animated.View style={[styles.caption, style]}>
-      <Text style={styles.captionEmoji}>{gift.emoji}</Text>
-      <View>
-        <Text style={styles.captionTitle}>
-          You sent a {gift.name}
-          {to ? ` to ${to}` : ''}
+    <Animated.View style={[styles.banner, slide]}>
+      {photo ? (
+        <Image source={{ uri: photo }} style={styles.bannerPhoto} />
+      ) : (
+        <View style={[styles.bannerPhoto, styles.bannerPhotoEmpty]}>
+          <Text style={styles.bannerEmoji}>{gift.emoji}</Text>
+        </View>
+      )}
+      <View style={styles.bannerText}>
+        <Text style={styles.bannerName} numberOfLines={1}>
+          {mine ? 'You' : from}
         </Text>
-        <Text style={styles.captionSub}>
-          {gift.coins.toLocaleString('en-IN')} coins · tap to skip
+        <Text style={styles.bannerSub} numberOfLines={1}>
+          sent {gift.name}
+          {mine && to ? ` to ${to}` : ''}
         </Text>
       </View>
+      <Text style={styles.bannerGift}>{gift.emoji}</Text>
+      {item.combo > 1 ? (
+        <Animated.Text style={[styles.combo, popStyle]}>
+          x{item.combo}
+        </Animated.Text>
+      ) : null}
     </Animated.View>
   );
 }
 
+/* One gift on screen: dim, rays, burst, the art and the banner. */
+function Stage({ item, leaving, failed, onFinish, onFailure, w, h }) {
+  const big = item.gift.coins >= BIG_GIFT_COINS;
+  const size = big ? w * 1.1 : w * 0.82;
+  const started = useRef(Date.now());
+  const minMs = big ? MIN_PLAY_BIG_MS : MIN_PLAY_MS;
+  const art = useSharedValue(0);
+  const dim = useSharedValue(0);
+  const fly = useSharedValue(1);
+  useEffect(() => {
+    dim.value = withTiming(1, { duration: 260 });
+    fly.value = withTiming(0, {
+      duration: 520,
+      easing: Easing.out(Easing.back(1.4)),
+    });
+    art.value = withSpring(1, { damping: 9, stiffness: 120, mass: 0.8 });
+  }, [art, dim, fly]);
+  useEffect(() => {
+    if (!leaving) return;
+    dim.value = withTiming(0, { duration: EXIT_MS });
+    art.value = withTiming(1.35, { duration: EXIT_MS });
+  }, [leaving, art, dim]);
+  const dimStyle = useAnimatedStyle(() => ({ opacity: dim.value }));
+  const artStyle = useAnimatedStyle(() => ({
+    // Pops in from small (spring overshoots), grows and fades on the way out.
+    opacity: art.value > 1.01 ? interpolate(art.value, [1, 1.35], [1, 0]) : 1,
+    transform: [
+      { translateY: fly.value * h * 0.35 },
+      { scale: art.value > 1.01 ? art.value : 0.3 + art.value * 0.7 },
+    ],
+  }));
+
+  return (
+    <>
+      <Animated.View
+        style={[styles.fill, big ? styles.dimBig : styles.dim, dimStyle]}
+      />
+      <View style={[styles.stage, { top: h * 0.5 - size / 2, height: size }]}>
+        {big ? <Rays size={size * 1.25} /> : null}
+        <Pulse size={size * 0.9} delay={350} color="rgba(255,213,79,0.9)" />
+        <Pulse size={size * 0.9} delay={900} color="rgba(255,123,172,0.9)" />
+        <Burst count={big ? 30 : 18} radius={big ? w * 0.6 : w * 0.42} />
+        {big ? <Burst count={18} radius={w * 0.45} delay={450} /> : null}
+        <Animated.View style={artStyle}>
+          {item.animation && !failed ? (
+            <LottieView
+              source={preloaded.get(item.animation) || { uri: item.animation }}
+              autoPlay
+              loop
+              resizeMode="contain"
+              style={{ width: size, height: size }}
+              onAnimationLoop={() =>
+                Date.now() - started.current >= minMs && onFinish()
+              }
+              onAnimationFinish={cancelled => !cancelled && onFinish()}
+              onAnimationFailure={onFailure}
+            />
+          ) : (
+            <View style={[styles.center, { width: size, height: size }]}>
+              <EmojiArt emoji={item.gift.emoji} size={size} />
+            </View>
+          )}
+        </Animated.View>
+      </View>
+      {Array.from({ length: big ? 16 : 10 }).map((_, i) => (
+        <Floater key={i} i={i} emoji={item.gift.emoji} w={w} h={h} big={big} />
+      ))}
+      <View style={[styles.bannerRow, { top: h * 0.5 - size / 2 - 64 }]}>
+        <Banner item={item} leaving={leaving} />
+      </View>
+    </>
+  );
+}
+
+/* ---------- provider ---------- */
+
 export function GiftFxProvider({ children }) {
+  const { config, user } = useApp();
   const [current, setCurrent] = useState(null);
+  const [leaving, setLeaving] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const queue = useRef([]);
+  const cur = useRef(null);
   const timer = useRef(null);
+  const leaveRef = useRef(() => {});
+  const leavingRef = useRef(false);
   const { width: w, height: h } = useWindowDimensions();
 
-  const close = useCallback(() => {
+  // The catalog from the server carries each gift's animation URL; socket
+  // payloads may only have the key.
+  const catalog = useMemo(
+    () => Object.fromEntries((config?.gifts || []).map(g => [g.key, g])),
+    [config?.gifts],
+  );
+  useEffect(() => {
+    for (const g of config?.gifts || []) preload(absolute(g.animation));
+  }, [config?.gifts]);
+
+  const show = useCallback(item => {
     clearTimeout(timer.current);
-    setCurrent(null);
+    cur.current = item;
+    leavingRef.current = false;
+    setFailed(false);
+    setLeaving(false);
+    setCurrent(item);
   }, []);
 
-  const play = useCallback((gift, meta = {}) => {
-    if (!SCENES[gift.key]) return;
+  const next = useCallback(() => {
     clearTimeout(timer.current);
-    // New key forces the scene to restart even for the same gift twice.
-    setCurrent({ gift, to: meta.to, id: Date.now() });
-    timer.current = setTimeout(
-      () => setCurrent(null),
-      DURATION[gift.key] + 200,
-    );
-  }, []);
+    const item = queue.current.shift() || null;
+    show(item);
+    if (item) {
+      timer.current = setTimeout(
+        () => leaveRef.current(),
+        item.animation ? MAX_PLAY_MS : EMOJI_MS,
+      );
+    }
+  }, [show]);
+
+  // Fade out, then the next gift (or nothing).
+  const leave = useCallback(() => {
+    clearTimeout(timer.current);
+    if (!cur.current) return;
+    leavingRef.current = true;
+    setLeaving(true);
+    timer.current = setTimeout(next, EXIT_MS);
+  }, [next]);
+  leaveRef.current = leave;
+
+  const onFailure = useCallback(() => {
+    setFailed(true);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(leave, EMOJI_MS);
+  }, [leave]);
+
+  const play = useCallback(
+    (gift, meta = {}) => {
+      if (!gift?.key) return;
+      const from = meta.from && meta.from !== 'You' ? meta.from : null;
+      const now = Date.now();
+      // Same sender, same gift, still on screen: count it as a combo.
+      const c = cur.current;
+      if (
+        c &&
+        !leavingRef.current &&
+        c.gift.key === gift.key &&
+        c.from === from &&
+        now - c.at < COMBO_MS
+      ) {
+        const bumped = { ...c, combo: c.combo + (gift.count || 1), at: now };
+        cur.current = bumped;
+        setCurrent(bumped);
+        clearTimeout(timer.current);
+        timer.current = setTimeout(leave, c.animation ? MAX_PLAY_MS : EMOJI_MS);
+        return;
+      }
+      if (queue.current.length >= MAX_QUEUE) return;
+      queue.current.push({
+        gift: { ...catalog[gift.key], ...gift },
+        animation: absolute(gift.animation || catalog[gift.key]?.animation),
+        from,
+        to: meta.to,
+        photo: meta.photo || (from ? null : user?.photos?.[0]),
+        combo: gift.count || 1,
+        at: now,
+        // New id restarts the player even for the same gift twice in a row.
+        id: `${now}${Math.random()}`,
+      });
+      if (!cur.current) next();
+    },
+    [catalog, next, leave, user],
+  );
 
   useEffect(() => () => clearTimeout(timer.current), []);
-
-  const Scene = current ? SCENES[current.gift.key] : null;
   const value = useMemo(() => ({ play }), [play]);
 
   return (
     <GiftFxContext.Provider value={value}>
       {children}
-      <Modal
-        visible={!!current}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
-        onRequestClose={close}
-      >
-        {current ? (
-          <Pressable style={StyleSheet.absoluteFill} onPress={close}>
-            <Scene key={current.id} w={w} h={h} />
-            <Caption
-              key={`c${current.id}`}
-              gift={current.gift}
-              to={current.to}
-            />
-          </Pressable>
-        ) : null}
-      </Modal>
+      {current ? (
+        <View style={styles.fill} pointerEvents="none">
+          <Stage
+            key={current.id}
+            item={current}
+            leaving={leaving}
+            failed={failed}
+            onFinish={leave}
+            onFailure={onFailure}
+            w={w}
+            h={h}
+          />
+        </View>
+      ) : null}
     </GiftFxContext.Provider>
   );
 }
 
 const styles = StyleSheet.create({
-  abs: { position: 'absolute' },
-  centerX: { left: 0, right: 0, alignItems: 'center' },
-  particle: { position: 'absolute', width: 9, height: 9, borderRadius: 5 },
-  particleGlyph: { position: 'absolute', fontSize: 22 },
-  fxTitle: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    textAlign: 'center',
-    fontFamily: fonts.extrabold,
-    fontSize: 40,
-    lineHeight: 48,
-    color: colors.white,
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowRadius: 8,
-  },
-  fxTitleDark: { color: '#0B3B66', textShadowColor: 'rgba(255,255,255,0.6)' },
-  // Car
-  carBg: { backgroundColor: '#0E0F16' },
-  building: {
-    position: 'absolute',
-    backgroundColor: '#1B1D2A',
-    paddingTop: 10,
-    paddingHorizontal: 8,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  window: { width: 6, height: 8, backgroundColor: '#3A3D52' },
-  windowLit: { backgroundColor: '#F5C451' },
-  road: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    height: 120,
-    backgroundColor: '#2B2B30',
-    overflow: 'hidden',
-  },
-  lanes: { flexDirection: 'row', marginTop: 56 },
-  lane: {
-    width: 60,
-    height: 8,
-    marginRight: 60,
-    borderRadius: 4,
-    backgroundColor: '#F5B301',
-  },
-  speedLine: {
-    position: 'absolute',
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: 'rgba(255,255,255,0.7)',
-  },
-  // Yacht
-  skyDay: { backgroundColor: '#8ED1F0' },
-  sun: { top: 70, right: 28, fontSize: 80 },
-  gulls: { fontSize: 34 },
-  // Castle
-  night: { backgroundColor: '#080E26' },
-  star: {
-    position: 'absolute',
-    width: 3,
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: '#FFFFFF',
-  },
-  moon: { top: 80, left: 30, fontSize: 64 },
-  // Rocket
-  space: { backgroundColor: '#050616' },
-  streak: {
+  // StyleSheet.absoluteFillObject no longer exists in this React Native.
+  fill: {
     position: 'absolute',
     top: 0,
-    width: 2,
-    height: 26,
-    borderRadius: 1,
-    backgroundColor: 'rgba(255,255,255,0.75)',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 1000,
+    elevation: 1000,
   },
-  rocketTilt: { transform: [{ rotate: '-45deg' }] },
-  flame: { fontSize: 54, lineHeight: 64, marginTop: -26 },
-  smoke: { fontSize: 70 },
-  // Caption
-  caption: {
+  abs: { position: 'absolute' },
+  center: { alignItems: 'center', justifyContent: 'center' },
+  dim: { backgroundColor: 'rgba(12,4,28,0.28)' },
+  dimBig: { backgroundColor: 'rgba(12,4,28,0.45)' },
+  stage: {
     position: 'absolute',
-    top: 56,
-    alignSelf: 'center',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  spark: { position: 'absolute' },
+  ring: { borderWidth: 3 },
+  floater: { position: 'absolute', top: 0, left: 0 },
+  bannerRow: { position: 'absolute', left: 14, right: 14 },
+  banner: {
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    paddingVertical: 8,
-    paddingLeft: 10,
-    paddingRight: 18,
+    paddingVertical: 6,
+    paddingLeft: 6,
+    paddingRight: 14,
     borderRadius: 30,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: 'rgba(91,42,134,0.92)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,213,79,0.85)',
   },
-  captionEmoji: { fontSize: 30 },
-  captionTitle: { fontFamily: fonts.bold, fontSize: 15, color: colors.white },
-  captionSub: {
+  bannerPhoto: { width: 40, height: 40, borderRadius: 20 },
+  bannerPhotoEmpty: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  bannerEmoji: { fontSize: 22 },
+  bannerText: { flexShrink: 1 },
+  bannerName: { fontFamily: fonts.bold, fontSize: 14, color: colors.white },
+  bannerSub: {
     fontFamily: fonts.medium,
     fontSize: 12,
-    color: 'rgba(255,255,255,0.75)',
+    color: 'rgba(255,255,255,0.8)',
+  },
+  bannerGift: { fontSize: 30, lineHeight: 38 },
+  combo: {
+    fontFamily: fonts.extrabold,
+    fontSize: 26,
+    lineHeight: 32,
+    color: '#FFD54F',
+    textShadowColor: 'rgba(0,0,0,0.45)',
+    textShadowRadius: 6,
   },
 });

@@ -28,6 +28,7 @@ export function toAppHost(p) {
     voiceRate: h.rates?.voice ?? 20,
     rating: h.rating ?? 5,
     level: h.level ?? 1,
+    category: h.category || null, // { key, name, color } from gift levels
     languages: h.languages || [],
     followers: p.followers || 0,
     interests: [],

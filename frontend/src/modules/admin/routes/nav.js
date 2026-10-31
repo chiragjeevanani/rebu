@@ -5,6 +5,7 @@ import {
   Building2,
   CircleDollarSign,
   Coins,
+  CircleUserRound,
   Crown,
   FileText,
   Flag,
@@ -19,6 +20,7 @@ import {
   Scale,
   ScrollText,
   Settings,
+  Target,
   ShieldCheck,
   ShoppingBag,
   Sparkles,
@@ -60,6 +62,7 @@ export const NAV = [
     items: [
       { to: '/admin/users', label: 'Users', icon: UserRound, section: 'users' },
       { to: '/admin/hosts', label: 'Hosts', icon: UsersRound, section: 'hosts' },
+      { to: '/admin/host-targets', label: 'Host targets', icon: Target, section: 'hosts' },
       {
         to: '/admin/host-applications',
         label: 'Host applications',
@@ -131,6 +134,7 @@ export const NAV = [
       { to: '/admin/monetization/coin-packs', label: 'Coin packs', icon: Coins, section: 'monetization' },
       { to: '/admin/monetization/gifts', label: 'Gifts', icon: Gift, section: 'monetization' },
       { to: '/admin/monetization/host-levels', label: 'Host levels & prices', icon: Sparkles, section: 'monetization' },
+      { to: '/admin/monetization/frames', label: 'Sender frames', icon: CircleUserRound, section: 'monetization' },
       { to: '/admin/monetization/vip', label: 'VIP & Royal Club', icon: Crown, section: 'monetization' },
       { to: '/admin/monetization/store', label: 'Store, tasks & families', icon: ShoppingBag, section: 'monetization' },
     ],

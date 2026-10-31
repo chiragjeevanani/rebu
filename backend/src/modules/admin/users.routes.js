@@ -15,7 +15,7 @@ import { notify } from '../notifications/notifications.js'
 export const usersAdmin = Router()
 usersAdmin.use(requireAdmin(Admin, 'users'))
 
-const LIST_FIELDS = { phone: 1, email: 1, name: 1, gender: 1, dob: 1, city: 1, photos: 1, coins: 1, spent: 1, vip: 1, verified: 1, verification: 1, status: 1, statusReason: 1, suspendedUntil: 1, device: 1, lastActive: 1, createdAt: 1, 'host.approved': 1 }
+const LIST_FIELDS = { phone: 1, email: 1, name: 1, gender: 1, dob: 1, city: 1, photos: 1, coins: 1, coinsBought: 1, spent: 1, vip: 1, verified: 1, verification: 1, status: 1, statusReason: 1, suspendedUntil: 1, device: 1, lastActive: 1, createdAt: 1, 'host.approved': 1 }
 
 const age = dob => (dob ? Math.floor((Date.now() - new Date(dob)) / (365.25 * 24 * 3600 * 1000)) : null)
 const userRow = u => ({ ...withId(u), avatar: u.photos?.[0] || null, age: age(u.dob), joined: u.createdAt, vip: u.vip?.level || 0, isHost: !!u.host?.approved })
@@ -36,7 +36,8 @@ usersAdmin.get(
     const q = req.query
     const pg = paging(q)
     const f = {}
-    if (q.hosts !== 'include') f['host.approved'] = { $ne: true }
+    // Hosts have their own page, except in the verification queue (hosts ask for the tick too).
+    if (q.hosts !== 'include' && q.verification !== 'pending') f['host.approved'] = { $ne: true }
     if (['active', 'suspended', 'banned'].includes(q.status)) f.status = q.status
     if (q.vip === 'vip') f['vip.level'] = { $gt: 0 }
     else if (q.vip !== undefined && q.vip !== 'any' && /^\d$/.test(q.vip)) f['vip.level'] = Number(q.vip)
@@ -116,7 +117,7 @@ usersAdmin.patch(
     await audit(req, what.join(', '), u._id)
     if ('verified' in body) {
       notify(u._id, body.verified
-        ? { kind: 'safety', title: 'You’re verified ✅', body: 'Your profile now shows the blue tick.' }
+        ? { kind: 'reward', title: 'You’re verified ✅', body: 'Your profile now shows the blue tick.' }
         : { kind: 'safety', title: 'Verification not approved', body: 'Your selfie didn’t clearly match your photos. You can try again.' })
     }
     res.json({ user: userRow(u) })

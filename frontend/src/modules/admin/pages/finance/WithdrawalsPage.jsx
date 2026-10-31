@@ -416,6 +416,12 @@ export default function WithdrawalsPage() {
               <dd className="a-row" style={{ gap: 8 }}>
                 {w.method.holder} <NameCheck ok={nameOk(w)} />
               </dd>
+              {detail.data?.withdrawal ? (
+                <>
+                  <dt>Verified ID</dt>
+                  <dd>{w.idType ? `${w.idType} ····${w.idLast4 || ''}` : <span className="a-muted">No ID on file</span>}</dd>
+                </>
+              ) : null}
               {w.method.kind === 'upi' ? null : (
                 <>
                   <dt>Account</dt>

@@ -304,8 +304,8 @@ export function VerificationScreen({ navigation }) {
   const verified = user.verified;
   const pending = user.server?.verification?.status === 'pending';
   const rejected = user.server?.verification?.status === 'rejected';
-  // 0 selfie · 1 sent for review · 2 verified
-  const step = verified ? 3 : pending ? 2 : 0;
+  // 0 take selfie · 1 waiting for review · 3 verified (all steps done)
+  const step = verified ? 3 : pending ? 1 : 0;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -415,11 +415,11 @@ export function VerificationScreen({ navigation }) {
           </Txt>
         ) : null}
         <Button
-          title={step >= 2 ? 'Done' : 'Take a selfie'}
-          icon={step >= 2 ? undefined : Camera}
+          title={step >= 1 ? 'Done' : 'Take a selfie'}
+          icon={step >= 1 ? undefined : Camera}
           loading={busy}
           disabled={busy}
-          onPress={() => (step >= 2 ? navigation.goBack() : takeSelfie())}
+          onPress={() => (step >= 1 ? navigation.goBack() : takeSelfie())}
         />
       </View>
     </Screen>
@@ -437,7 +437,7 @@ const CONTENT = {
       ],
       [
         'How do I become a host?',
-        'Go to Profile → Become a host, complete verification and join an agency or apply directly. Hosts earn from calls, chats and gifts.',
+        'Hosting is open to women only. Go to Profile → Become a host, complete verification and join an agency or apply directly. Hosts earn from calls, chats and gifts.',
       ],
       [
         'When are withdrawals processed?',

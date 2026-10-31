@@ -128,7 +128,7 @@ async function settle(orderId, { result, method, gatewayPaymentId, failureReason
         { type: 'purchase', title: `Bought ${p.coins} coins${p.bonus ? ` + ${p.bonus} bonus` : ''}`, ref: { kind: 'Payment', id: p._id }, meta: { packId: p.packId, amount: p.amount } },
         s,
       )
-      await User.updateOne({ _id: userId }, { $inc: { spent: p.amount } }, { session: s })
+      await User.updateOne({ _id: userId }, { $inc: { spent: p.amount, coinsBought: p.coins + (p.bonus || 0) } }, { session: s })
     }
     return { order: p, applied: true }
   })

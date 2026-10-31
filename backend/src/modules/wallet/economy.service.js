@@ -101,9 +101,9 @@ export async function adjustEarnings(hostId, amount, detail, session) {
  * User pays coins and the host earns, atomically (calls, chat, gifts, tickets).
  * Returns { balance, earning }.
  */
-export async function chargeUserPayHost({ userId, hostId, coins, source, txnType, title, ref, minutes, detail, fromName }, session) {
+export async function chargeUserPayHost({ userId, hostId, coins, source, txnType, title, ref, minutes, detail, fromName, meta }, session) {
   return withTxn(async s => {
-    const balance = await debitCoins(userId, coins, { type: txnType || source, title, ref }, s)
+    const balance = await debitCoins(userId, coins, { type: txnType || source, title, ref, meta }, s)
     const earning = await recordEarning(hostId, { source, coins, from: userId, fromName, minutes, detail, ref }, s)
     return { balance, earning }
   }, session)
@@ -144,8 +144,8 @@ export async function hostBalance(hostId, session) {
   }
 }
 
-/** Host level from total connected call minutes (unless an admin overrode it). */
-export function levelForMinutes(minutes) {
+/** Host level from lifetime gift coins received (unless an admin overrode it). */
+export function levelForGifts(giftCoins) {
   const { hostLevels } = getConfig()
-  return hostLevels.filter(l => minutes >= l.minutes).pop()?.level || 1
+  return hostLevels.filter(l => giftCoins >= l.giftCoins).pop()?.level || 1
 }

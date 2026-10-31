@@ -49,6 +49,7 @@ const suites = [
   }],
   ['lives + rooms', () => withServer('rebu_it_lives', 4203, {}, () => run('node', ['scripts/test-lives.js'], { PORT: '4203', MONGO_URI: uri('rebu_it_lives') }))],
   ['social (moments, store, tasks, families, notifications)', () => withServer('rebu_it_social', 4205, {}, () => run('node', ['scripts/test-social.js'], { PORT: '4205', MONGO_URI: uri('rebu_it_social') }))],
+  ['economy controls', () => withServer('rebu_it_econ', 4206, { RAZORPAY_KEY_ID: '', RAZORPAY_KEY_SECRET: '' }, () => run('node', ['scripts/test-economy-controls.js'], { API: 'http://127.0.0.1:4206', MONGO_URI: uri('rebu_it_econ') }))],
   ['admin + reports', () => withServer('rebu_it_admin', 4204, {}, () => run('node', ['scripts/test-admin.js'], { API: 'http://127.0.0.1:4204', MONGO_URI: uri('rebu_it_admin') }))],
 ]
 

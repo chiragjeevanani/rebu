@@ -52,6 +52,9 @@ for (const k of ['demo', 'h2', 'h3', 'h4', 'h5', 'h6']) {
   if (u.coins < 600) await creditCoins(u._id, 1000 - u.coins, { type: 'admin_adjust', title: 'test top-up' })
 }
 await User.updateOne({ _id: U.demo.id }, { $pull: { following: U.h1.doc._id } })
+// Going live / opening rooms is women-only (settings.hostApply.liveWomenOnly); the demo user is
+// a man, so the flows below run as a woman and the rule itself is tested at the end.
+await User.updateOne({ _id: U.demo.id }, { $set: { gender: 'Female' } })
 
 async function api(who, method, path, body) {
   const r = await fetch(`${BASE}/api${path}`, {
@@ -234,6 +237,41 @@ try {
   r = await api('h6', 'POST', '/lives', { mode: 'audio', title: 'Late night talk' })
   ok(r.status === 201 && r.live?.seats?.length === 8, 'audio room starts with seats')
   await api('h6', 'POST', `/lives/${r.live.id}/end`)
+
+  // ===== women only: men can't go live or open rooms =====
+  console.log('\nLive & rooms are women-only')
+  await User.updateOne({ _id: U.demo.id }, { $set: { gender: 'Male' } })
+  for (const body of [
+    { mode: 'live', title: 'Men go live' },
+    { mode: 'party', title: 'Men party room', welcome: 'hi', category: 'Chat' },
+    { mode: 'audio', title: 'Men audio room', welcome: 'hi', category: 'Chat' },
+    { mode: 'premium', title: 'Men premium', ticket: 100 },
+  ]) {
+    r = await api('demo', 'POST', '/lives', body)
+    ok(r.status === 403 && r.error?.code === 'women_only_live', `a man can't start a ${body.mode} (403 women_only_live)`, r)
+  }
+  ok(/rooms/i.test((await api('demo', 'POST', '/lives', { mode: 'audio', title: 'x' })).error?.message || ''), 'the message for rooms says rooms')
+  ok(!(await Live.exists({ owner: U.demo.id, status: 'live' })), 'nothing was created for him')
+  // A man who is an approved host is held to it too.
+  const hostBefore = (await User.findById(U.demo.id, { host: 1 }).lean()).host
+  await User.updateOne({ _id: U.demo.id }, { $set: { 'host.approved': true, 'host.status': 'active' } })
+  r = await api('demo', 'POST', '/lives', { mode: 'live', title: 'Host man' })
+  ok(r.status === 403 && r.error?.code === 'women_only_live', 'a man who is an approved host is held to it too', r)
+  await User.updateOne({ _id: U.demo.id }, { $set: { host: hostBefore || {} } })
+  // Men can still watch, join and gift: join one of h1's lives.
+  r = await api('h1', 'POST', '/lives', { mode: 'live', title: 'Women only host' })
+  ok(r.status === 201, 'a woman can go live', r)
+  const wlive = r.live.id
+  r = await api('demo', 'POST', `/lives/${wlive}/join`)
+  ok(r.status === 200, 'a man can still join and watch', r)
+  await api('demo', 'POST', `/lives/${wlive}/leave`)
+  await api('h1', 'POST', `/lives/${wlive}/end`)
+  // Other genders aren't blocked by this rule.
+  await User.updateOne({ _id: U.demo.id }, { $set: { gender: 'Other' } })
+  r = await api('demo', 'POST', '/lives', { mode: 'live', title: 'Other can' })
+  ok(r.status === 201, 'the rule is for men only (Other can go live)', r)
+  await api('demo', 'POST', `/lives/${r.live.id}/end`)
+  await User.updateOne({ _id: U.demo.id }, { $set: { gender: 'Male' } })
 } catch (e) {
   fail += 1
   console.error('test crashed:', e)

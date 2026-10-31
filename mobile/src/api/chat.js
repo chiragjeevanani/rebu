@@ -20,7 +20,8 @@ export function timeLabel(ts) {
 const preview = m => {
   if (!m) return 'Say hi 👋';
   const p = m.mine ? 'You: ' : '';
-  if (m.type === 'gift') return `${p}🎁 ${m.gift?.name || 'Gift'}`;
+  if (m.type === 'gift')
+    return `${p}🎁 ${m.gift?.name || 'Gift'}${m.gift?.count > 1 ? ` ×${m.gift.count}` : ''}`;
   if (m.type === 'image') return `${p}📷 Photo`;
   return `${p}${m.text}`;
 };

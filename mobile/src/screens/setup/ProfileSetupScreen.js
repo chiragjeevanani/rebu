@@ -20,6 +20,12 @@ import Chip from '../../components/Chip';
 import PhotoSourceSheet from '../../components/PhotoSourceSheet';
 import { patch, setToken } from '../../api/client';
 
+// While typing, 15061999 becomes 15-06-1999 (the number pad has no separators).
+const formatDob = v => {
+  const d = v.replace(/D/g, '').slice(0, 8);
+  return [d.slice(0, 2), d.slice(2, 4), d.slice(4)].filter(Boolean).join('-');
+};
+
 // 'DD / MM / YYYY' (any separators) → '2001-04-23'
 const toIsoDate = v => {
   const [d, m, y] = v.split(/[^0-9]+/).filter(Boolean);
@@ -142,7 +148,7 @@ export default function ProfileSetupScreen({ navigation, route }) {
               keyboardType="number-pad"
               maxLength={10}
               value={form.dob}
-              onChangeText={v => set('dob', v)}
+              onChangeText={v => set('dob', formatDob(v))}
               style={styles.field}
             />
             <Txt variant="small" style={{ marginTop: -6, marginBottom: 18 }}>

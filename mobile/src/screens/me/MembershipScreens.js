@@ -159,7 +159,7 @@ export function AristocracyScreen({ navigation }) {
                 ? `Extend ${rank.name} · ${num(rank.price)} coins`
                 : `Become ${rank.name} · ${num(rank.price)} coins`
             }
-            gradient={['#C9A86A', '#8A6A2F']}
+            gradient={['#A8823F', '#A8823F']}
             onPress={() =>
               setBuying({
                 title: `${rank.name} · 30 days`,

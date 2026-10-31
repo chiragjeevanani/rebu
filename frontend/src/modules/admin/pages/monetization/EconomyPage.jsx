@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { AlertTriangle, Calculator, Coins, Percent, Save, Undo2, Users, Wallet } from 'lucide-react'
+import { AlertTriangle, Calculator, Coins, Percent, Radio, Save, Undo2, Users, Wallet } from 'lucide-react'
 import { useStore } from '../../hooks/useStore'
 import { useToast } from '../../hooks/useToast'
 import { errorText } from '../../api/client'
@@ -26,7 +26,9 @@ const FIELDS = [
   { path: 'payoutTime', label: 'Payout time', kind: 'text' },
   { path: 'welcomeBonusCoins', label: 'New host bonus', kind: 'coins' },
   { path: 'newUserCoins', label: 'Signup gift', kind: 'coins' },
+  { path: 'minLiveBalance', label: 'Minimum balance to join a live', kind: 'coins' },
   { path: 'messageCost', label: 'Message cost', kind: 'coins', min: 1 },
+  { path: 'maxGiftQuantity', label: 'Max gifts per send', kind: 'coins', min: 1 },
 ]
 
 const get = (obj, path) => path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj)
@@ -53,6 +55,7 @@ function validate(f, v, values) {
   if (f.kind === 'pct') return v < 0 || v > 90 ? 'Must be between 0 and 90%' : null
   if (f.kind === 'coins') {
     if (!Number.isInteger(v)) return 'Whole coins only'
+    if (f.path === 'maxGiftQuantity' && v > 999) return 'Up to 999'
     return v < (f.min ?? 0) ? `Must be at least ${f.min ?? 0}` : null
   }
   if (v <= 0) return 'Must be more than 0'
@@ -204,6 +207,10 @@ export default function EconomyPage() {
           <Card title="Coin value" subtitle="What one coin is worth when REBU settles earnings with hosts">
             <div className="a-stack">
               {field('coinInr', { label: 'Coin value (₹ per coin)', affix: '₹' })}
+              <div className="a-small">
+                Redemption rule: <b>100 coins = {inr(100 * coinInr)}</b> · <b>1,000 coins = {inr(1000 * coinInr)}</b> · <b>10,000 coins = {inr(10000 * coinInr)}</b>
+                <span className="a-muted"> (before commission). Applies to what hosts earn from now on; past earnings keep the value they were earned at.</span>
+              </div>
               {cheapest ? (
                 <div className="a-small a-muted">
                   Users pay {inr(perCoin(cheapest))} per coin on the cheapest pack ({num(cheapest.coins + cheapest.bonus)} coins for {inr(cheapest.price)}), so
@@ -247,11 +254,16 @@ export default function EconomyPage() {
             </div>
           </Card>
 
-          <Card title="Users & hosts" subtitle="Starter coins and chat pricing">
-            <div className="a-grid c3">
+          <Card title="Users & hosts" subtitle="Starter coins, chat pricing and live entry">
+            <div className="a-grid c2">
+              {field('newUserCoins', { affix: 'coins', hint: 'Bonus coins every new user gets when they sign up' })}
+              {field('minLiveBalance', {
+                affix: 'coins',
+                hint: 'Coins a user must hold to enter a host’s live. Nothing is charged. 0 = no minimum',
+              })}
               {field('welcomeBonusCoins', { affix: 'coins', hint: 'Credited when a host is approved' })}
-              {field('newUserCoins', { affix: 'coins', hint: 'Free coins on signup' })}
               {field('messageCost', { affix: 'coins', hint: 'Charged per chat message' })}
+              {field('maxGiftQuantity', { affix: 'gifts', hint: 'Most of one gift a user can send at once (the + button in the gift sheet stops here)' })}
             </div>
           </Card>
 
@@ -311,6 +323,7 @@ export default function EconomyPage() {
               <Glance icon={Percent} label="Video call commission" value={pct(live('commission.video'))} />
               <Glance icon={Wallet} label="Withdrawal" value={`${pct(live('withdrawFee'))} fee · min ${inr(live('minWithdraw'))}`} />
               <Glance icon={Users} label="Signup gift" value={`${num(live('newUserCoins'))} coins`} />
+              <Glance icon={Radio} label="To join a live" value={live('minLiveBalance') ? `${num(live('minLiveBalance'))}+ coins` : 'No minimum'} />
             </div>
           </Card>
         </div>

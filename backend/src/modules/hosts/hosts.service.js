@@ -3,7 +3,7 @@
 import { User } from '../users/user.model.js'
 import { Agency, HostApplication } from './hosts.models.js'
 import { getConfig } from '../config/config.service.js'
-import { levelForMinutes, recordEarning, withTxn } from '../wallet/economy.service.js'
+import { levelForGifts, recordEarning, withTxn } from '../wallet/economy.service.js'
 import { toUser } from '../../core/realtime.js'
 import { notify } from '../notifications/notifications.js'
 import { conflict, notFound } from '../../core/errors.js'
@@ -24,8 +24,8 @@ export const maskAccount = acc => (acc ? `••${String(acc).slice(-4)}` : unde
 
 export const ageOn = (dob, now = Date.now()) => (now - new Date(dob).getTime()) / (365.25 * DAY)
 
-/** Effective level: admin override, else by connected call minutes. */
-export const hostLevel = host => host?.levelOverride || levelForMinutes(host?.callMinutes || 0)
+/** Effective level: admin override, else by lifetime gift coins received. */
+export const hostLevel = host => host?.levelOverride || levelForGifts(host?.giftCoins || 0)
 
 export const levelCap = level => {
   const { hostLevels } = getConfig()

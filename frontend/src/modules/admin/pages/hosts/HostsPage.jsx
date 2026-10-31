@@ -6,7 +6,9 @@ import { useToast } from '../../hooks/useToast'
 import { serverTable, useApi, usePaging } from '../../hooks/useApi'
 import { api, errorText } from '../../api/client'
 import { canAccess } from '../../routes/nav'
-import { Badge, Button, Card, Confirm, DataTable, PageHeader, SearchInput, Seg, Select, Status, Who } from '../../components/ui'
+import { Button, Card, Confirm, DataTable, PageHeader, SearchInput, Seg, Select, Status, Who } from '../../components/ui'
+import { CategoryChip } from '../../components/LevelChips'
+import { categoryOf } from '../../utils/levels'
 import { exportCsv, inr, num } from '../../utils/format'
 
 const STATUS = [
@@ -15,8 +17,6 @@ const STATUS = [
   { value: 'suspended', label: 'Suspended' },
   { value: 'banned', label: 'Banned' },
 ]
-
-const LEVEL_TONES = ['neutral', 'info', 'violet', 'warning']
 
 function useDebounced(value, delay = 300) {
   const [v, setV] = useState(value)
@@ -98,12 +98,17 @@ export default function HostsPage() {
       serverSort: 'name',
       render: h => <Who src={h.avatar} name={h.name} sub={[h.id, h.city].filter(Boolean).join(' · ')} to={`/admin/hosts/${h.id}`} />,
     },
-    { key: 'level', label: 'Level', serverSort: 'level', render: h => <Badge tone={LEVEL_TONES[h.level - 1]}>Lv {h.level}</Badge> },
+    {
+      key: 'level',
+      label: 'Level',
+      serverSort: 'level',
+      render: h => <CategoryChip category={categoryOf(db.config.hostCategories, h.level)} suffix={`· Lv ${h.level}`} />,
+    },
     { key: 'video', label: 'Video', align: 'right', render: h => <span className="a-nowrap">{h.rates.video}/min</span> },
     { key: 'voice', label: 'Voice', align: 'right', render: h => <span className="a-nowrap">{h.rates.voice}/min</span> },
     { key: 'callMinutes', label: 'Call min', align: 'right', serverSort: 'minutes', render: h => num(h.callMinutes) },
-    { key: 'lifetime', label: 'Earned', align: 'right', render: h => <b className="a-strong">{inr(h.lifetime)}</b> },
-    { key: 'available', label: 'Balance', align: 'right', render: h => inr(h.available) },
+    { key: 'lifetime', label: 'Earned', align: 'right', serverSort: 'lifetime', render: h => <b className="a-strong">{inr(h.lifetime)}</b> },
+    { key: 'available', label: 'Balance', align: 'right', serverSort: 'available', render: h => inr(h.available) },
     {
       key: 'rating',
       label: 'Rating',
@@ -144,6 +149,7 @@ export default function HostsPage() {
                 { label: 'Phone', value: h => h.phone },
                 { label: 'City', value: h => h.city },
                 { label: 'Level', value: h => h.level },
+                { label: 'Category', value: h => categoryOf(db.config.hostCategories, h.level)?.name || '' },
                 { label: 'Video rate (coins/min)', value: h => h.rates.video },
                 { label: 'Voice rate (coins/min)', value: h => h.rates.voice },
                 { label: 'Call minutes', value: h => h.callMinutes },
@@ -191,7 +197,7 @@ export default function HostsPage() {
               <Select
                 value={level}
                 onChange={e => setLevel(e.target.value)}
-                options={[{ value: 'any', label: 'All levels' }, ...db.config.hostLevels.map(l => ({ value: String(l.level), label: `Level ${l.level}` }))]}
+                options={[{ value: 'any', label: 'All levels' }, ...db.config.hostLevels.map(l => ({ value: String(l.level), label: `Level ${l.level} · ${categoryOf(db.config.hostCategories, l.level)?.name || ''}` }))]}
               />
               <Select
                 value={online}

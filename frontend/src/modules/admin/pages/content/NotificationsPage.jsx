@@ -203,9 +203,10 @@ export default function NotificationsPage() {
       sort: whenOf,
       render: n => (whenOf(n) ? <span className="a-nowrap">{dateTime(whenOf(n))}</span> : <span className="a-faint">—</span>),
     },
-    // TODO(api): delivered/opened stay 0 until the backend sends via FCM and records receipts.
-    { key: 'delivered', label: 'Delivered', align: 'right', sort: n => n.delivered, render: n => (n.delivered ? num(n.delivered) : '—') },
-    { key: 'opened', label: 'Opened', align: 'right', sort: n => n.opened, render: n => (n.status === 'sent' ? num(n.opened) : '—') },
+    // Delivered = users reached in the app inbox; Pushed = phone pushes FCM accepted; Opened = users who read it.
+    { key: 'delivered', label: 'Delivered', align: 'right', sort: n => n.delivered || 0, render: n => (n.status === 'sent' ? <span title="Users reached in the app inbox">{num(n.delivered || 0)}</span> : '—') },
+    { key: 'pushed', label: 'Pushed', align: 'right', sort: n => n.pushed || 0, render: n => (n.status === 'sent' ? <span title="Phone pushes accepted by FCM">{num(n.pushed || 0)}</span> : '—') },
+    { key: 'opened', label: 'Opened', align: 'right', sort: n => n.opened || 0, render: n => (n.status === 'sent' ? num(n.opened || 0) : '—') },
     {
       key: 'rate',
       label: 'Open rate',
