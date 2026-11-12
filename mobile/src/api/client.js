@@ -2,10 +2,10 @@
 // `adb reverse tcp:4000 tcp:4000`, so localhost works on device too.
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export const API_URL = 'http://201.18.218.21:4000';
+export const API_URL = 'http://200.234.42.159:4000';
 
 // Keep in step with android/app/build.gradle versionName.
-export const APP_VERSION = '1.3.4';
+export const APP_VERSION = '1.3.5';
 
 const TOKEN_KEY = 'rebu.token.v1';
 let token = null;
