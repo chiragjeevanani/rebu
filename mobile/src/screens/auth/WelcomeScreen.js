@@ -88,7 +88,7 @@ export default function WelcomeScreen({ navigation }) {
         <View style={[styles.activePill, { top: insets.top + 12 }]}>
           <View style={styles.dot} />
           <Txt variant="tiny" color={colors.ink}>
-            2M+ users online
+            Verified hosts · 18+
           </Txt>
         </View>
       </View>

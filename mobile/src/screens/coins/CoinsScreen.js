@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -23,12 +23,6 @@ import { get, post } from '../../api/client';
 
 // Pack art by position (the packs themselves come from the server / admin panel).
 const ART = ['🪙', '💰', '🎁', '💎', '🏆', '👑'];
-const FLASH_SECONDS = 9 * 60 + 59;
-
-const clock = s =>
-  [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60]
-    .map(n => String(n).padStart(2, '0'))
-    .join(':');
 
 function Pack({ pack, onPress }) {
   return (
@@ -72,7 +66,6 @@ function Pack({ pack, onPress }) {
 
 export default function CoinsScreen({ navigation, stack }) {
   const { user, setCoinsFromServer } = useApp();
-  const [left, setLeft] = useState(FLASH_SECONDS);
   const [packs, setPacks] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -92,13 +85,6 @@ export default function CoinsScreen({ navigation, stack }) {
   }, []);
   useFocusEffect(load);
 
-  useEffect(() => {
-    const t = setInterval(
-      () => setLeft(s => (s > 0 ? s - 1 : FLASH_SECONDS)),
-      1000,
-    );
-    return () => clearInterval(t);
-  }, []);
 
   const toCard = (p, i) => ({
     ...p,
@@ -217,10 +203,6 @@ export default function CoinsScreen({ navigation, stack }) {
           <>
             <View style={styles.head}>
               <Txt style={styles.title}>⚡ Coin packs</Txt>
-              <View style={styles.headRight}>
-                <Clock size={15} color={colors.textMuted} />
-                <Txt style={styles.timer}>{clock(left)}</Txt>
-              </View>
             </View>
             <View style={styles.grid}>
               {regular.map(p => (
@@ -316,7 +298,6 @@ const styles = StyleSheet.create({
     lineHeight: 26,
     color: colors.ink,
   },
-  timer: { fontFamily: fonts.semibold, fontSize: 15, color: colors.ink },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   pack: {
     width: '31.5%',

@@ -96,6 +96,7 @@ export function AppProvider({ children }) {
   const [greeted, setGreeted] = useState([]);
   const [store, setStore] = useState(EMPTY_STORE);
   const [unread, setUnread] = useState(0);
+  const [chatUnread, setChatUnread] = useState(0); // conversations with unread messages
   const [filters, setFilters] = useState({
     ageMin: 21,
     ageMax: 32,
@@ -209,6 +210,15 @@ export function AppProvider({ children }) {
     [],
   );
 
+  // The Chats tab badge: how many conversations have unread messages.
+  const refreshChatUnread = useCallback(
+    () =>
+      get('/chats?limit=50')
+        .then(r => setChatUnread(r.items.filter(c => c.unread).length))
+        .catch(() => {}),
+    [],
+  );
+
   // ---- Server session ----------------------------------------------------
   const applyServerUser = useCallback(
     u => {
@@ -241,6 +251,7 @@ export function AppProvider({ children }) {
     setStore(EMPTY_STORE);
     setGreeted([]);
     setUnread(0);
+    setChatUnread(0);
     setEarnings([]);
     setWithdrawals([]);
     setPayoutMethods([]);
@@ -254,6 +265,7 @@ export function AppProvider({ children }) {
     refreshHosts();
     refreshStore();
     refreshUnread();
+    refreshChatUnread();
     get('/social/greeted')
       .then(r => setGreeted(r.ids))
       .catch(() => {});
@@ -261,7 +273,7 @@ export function AppProvider({ children }) {
     put('/me/device', { platform: Platform.OS, appVersion: APP_VERSION }).catch(
       () => {},
     );
-  }, [refreshHostApp, refreshStore, refreshUnread]);
+  }, [refreshHostApp, refreshStore, refreshUnread, refreshChatUnread]);
 
   /** After OTP verify: store the token, load the profile, open the socket. */
   const startSession = useCallback(
@@ -347,6 +359,7 @@ export function AppProvider({ children }) {
 
   // Server pushes that change the wallet or the inbox.
   useEffect(() => {
+    let chatTimer;
     const balance = p => {
       if (typeof p?.balance === 'number') setCoinsFromServer(p.balance);
     };
@@ -355,13 +368,20 @@ export function AppProvider({ children }) {
       onSocket('call:ended', balance),
       onSocket('wallet:update', balance),
       onSocket('notification:new', () => setUnread(n => n + 1)),
+      onSocket('chat:message', () => {
+        clearTimeout(chatTimer);
+        chatTimer = setTimeout(refreshChatUnread, 600);
+      }),
       onSocket('host:application', () => {
         refreshMe().catch(() => {});
         refreshHostApp();
       }),
     ];
-    return () => offs.forEach(off => off());
-  }, [refreshMe, refreshHostApp, setCoinsFromServer]);
+    return () => {
+      clearTimeout(chatTimer);
+      offs.forEach(off => off());
+    };
+  }, [refreshMe, refreshHostApp, refreshChatUnread, setCoinsFromServer]);
 
   // ---- Host ---------------------------------------------------------------
   const addEarning = useCallback(() => {
@@ -541,6 +561,9 @@ export function AppProvider({ children }) {
       equipped: store.equipped || {},
       diamonds: store.diamonds || 0,
       unread,
+      chatUnread,
+      setChatUnread,
+      refreshChatUnread,
       startSession,
       refreshMe,
       refreshHostApp,
@@ -606,6 +629,9 @@ export function AppProvider({ children }) {
       nobility,
       owned,
       unread,
+      chatUnread,
+      setChatUnread,
+      refreshChatUnread,
       startSession,
       refreshMe,
       refreshHostApp,

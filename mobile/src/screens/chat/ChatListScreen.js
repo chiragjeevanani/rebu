@@ -99,15 +99,19 @@ function Row({
 
 export default function ChatListScreen({ navigation }) {
   useSecureScreen();
-  const { following, greeted, toggleFollow } = useApp();
+  const { following, greeted, toggleFollow, unread, setChatUnread } = useApp();
   const [items, setItems] = useState([]);
   const hosts = useHosts();
 
   const load = useCallback(() => {
     get('/chats?limit=50')
-      .then(r => setItems(r.items.map(toAppChat)))
+      .then(r => {
+        const list = r.items.map(toAppChat);
+        setItems(list);
+        setChatUnread(list.filter(c => c.unread).length);
+      })
       .catch(() => {});
-  }, []);
+  }, [setChatUnread]);
   useFocusEffect(load);
   // New messages (and read receipts) refresh the list.
   useSocketEvent('chat:message', load);
@@ -300,8 +304,7 @@ export default function ChatListScreen({ navigation }) {
                 logo
                 title="REBU Team"
                 sub="Welcome to REBU! 🎉 Tap to see offers & updates"
-                time="10:35"
-                unread={1}
+                unread={unread}
                 onPress={() => navigation.navigate('Notifications')}
               />
             ) : null}

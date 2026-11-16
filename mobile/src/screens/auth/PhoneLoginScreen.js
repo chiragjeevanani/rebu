@@ -1,11 +1,6 @@
-import React, { useState } from 'react';
-import {
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  StyleSheet,
-  View,
-} from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Dimensions, Keyboard, Pressable, StyleSheet, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ChevronDown, FlaskConical, ShieldCheck } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
 import { DEMO_ACCOUNT } from '../../data/mock';
@@ -20,6 +15,22 @@ export default function PhoneLoginScreen({ navigation }) {
   const [phone, setPhone] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  // Edge-to-edge Android doesn't resize the window for the keyboard, so pad
+  // the bottom by the part of the screen the keyboard covers (keeps Send OTP
+  // visible above it).
+  const insets = useSafeAreaInsets();
+  const [keyboard, setKeyboard] = useState(0);
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', e => {
+      const covered = Dimensions.get('screen').height - e.endCoordinates.screenY;
+      setKeyboard(Math.max(0, covered - insets.bottom));
+    });
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboard(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, [insets.bottom]);
 
   const send = async () => {
     const digits = phone.replace(/[^0-9]/g, '');
@@ -43,10 +54,7 @@ export default function PhoneLoginScreen({ navigation }) {
   return (
     <Screen edges={['top', 'bottom']}>
       <Header />
-      <KeyboardAvoidingView
-        style={styles.body}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
+      <View style={[styles.body, { paddingBottom: keyboard }]}>
         <Txt variant="h1">What’s your number?</Txt>
         <Txt variant="body" color={colors.textMuted} style={styles.sub}>
           We’ll send you a 6-digit code to verify it’s really you.
@@ -113,7 +121,7 @@ export default function PhoneLoginScreen({ navigation }) {
           onPress={() => navigation.navigate('EmailAuth')}
           style={{ marginTop: 6 }}
         />
-      </KeyboardAvoidingView>
+      </View>
     </Screen>
   );
 }

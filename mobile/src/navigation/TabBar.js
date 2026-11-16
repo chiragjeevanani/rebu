@@ -16,6 +16,7 @@ import {
 } from 'lucide-react-native';
 import { colors, fonts } from '../theme';
 import Txt from '../components/Txt';
+import { useApp } from '../context/AppContext';
 
 const TABS = {
   ForYou: { label: 'For You', icon: ThumbsUp, fill: true },
@@ -25,7 +26,6 @@ const TABS = {
   HostTab: { label: 'Host', icon: BadgeIndianRupee, fill: false },
   Chats: { label: 'Chats', icon: MessageCircleMore, fill: true },
 };
-const BADGES = { Chats: '1' };
 const LINE_W = 28;
 
 // `position` is the pager's live page offset (e.g. 1.37 mid-swipe), driven on the
@@ -38,7 +38,14 @@ const closeness = (position, index) =>
   });
 
 function TabItem({ route, index, position, onPress }) {
+  const { chatUnread } = useApp();
   const tab = TABS[route.name];
+  const badge =
+    route.name === 'Chats' && chatUnread > 0
+      ? chatUnread > 99
+        ? '99+'
+        : String(chatUnread)
+      : null;
   const Icon = tab.icon;
   const active = closeness(position, index);
   const inactive = RNAnimated.subtract(1, active);
@@ -66,9 +73,9 @@ function TabItem({ route, index, position, onPress }) {
             strokeWidth={tab.fill ? 1.7 : 2.6}
           />
         </RNAnimated.View>
-        {BADGES[route.name] ? (
+        {badge ? (
           <View style={styles.badge}>
-            <Txt style={styles.badgeText}>{BADGES[route.name]}</Txt>
+            <Txt style={styles.badgeText}>{badge}</Txt>
           </View>
         ) : null}
       </View>
