@@ -5,7 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 export const API_URL = 'http://200.234.42.159:4000';
 
 // Keep in step with android/app/build.gradle versionName.
-export const APP_VERSION = '1.3.5';
+export const APP_VERSION = '1.4.0';
 
 const TOKEN_KEY = 'rebu.token.v1';
 let token = null;
