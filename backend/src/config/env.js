@@ -20,6 +20,8 @@ export const env = {
   jwtSecret: req('JWT_SECRET'),
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '30d',
   adminJwtExpiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '12h',
+  // Public address for links to uploaded files (e.g. https://rebu.live). Blank = the address the request came in on.
+  publicUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),
   corsOrigins: (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
   otpProvider: process.env.OTP_PROVIDER || 'mock',
   demoPhone: process.env.DEMO_PHONE || '',
