@@ -1,103 +1,64 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { StyleSheet } from 'react-native';
 import {
   Ban,
-  Bell,
   Camera,
-  Eye,
-  EyeOff,
   FileText,
-  Globe,
   Lock,
   Mail,
-  MapPin,
-  MessageCircle,
-  Phone,
   ShieldCheck,
   Smartphone,
   Trash2,
-  Video,
 } from 'lucide-react-native';
 import { colors, spacing } from '../../theme';
 import Screen from '../../components/Screen';
 import Header from '../../components/Header';
 import Txt from '../../components/Txt';
 import ListRow, { Card } from '../../components/ListRow';
+import { useApp } from '../../context/AppContext';
+
+// "98765 43210" → "+91 98••• ••210"
+const maskPhone = p => {
+  const d = String(p || '').replace(/\D/g, '').slice(-10);
+  return d.length === 10 ? `+91 ${d.slice(0, 2)}••• ••${d.slice(7)}` : '';
+};
 
 export default function SettingsScreen({ navigation }) {
-  const [s, setS] = useState({
-    showDistance: true,
-    showOnline: true,
-    incognito: false,
-    readReceipts: true,
-    allowCalls: true,
-    pushMatches: true,
-    pushMessages: true,
-    pushLikes: true,
-    pushPromos: false,
-  });
-  const t = k => ({
-    toggle: s[k],
-    onToggle: v => setS(p => ({ ...p, [k]: v })),
-  });
+  const { user } = useApp();
+  const phone = maskPhone(user?.phone);
+  const email = user?.email || '';
+  const account = [
+    phone ? { icon: Smartphone, title: 'Phone number', value: phone } : null,
+    email ? { icon: Mail, title: 'Email', value: email } : null,
+    email
+      ? {
+          icon: Lock,
+          title: 'Change password',
+          onPress: () => navigation.navigate('ForgotPassword'),
+        }
+      : null,
+  ].filter(Boolean);
 
   return (
     <Screen scroll>
       <Header title="Settings" />
 
-      <Txt variant="tiny" style={styles.group}>
-        ACCOUNT
-      </Txt>
-      <Card padded={false} style={styles.card}>
-        <ListRow
-          icon={Smartphone}
-          title="Phone number"
-          value="+91 98••• ••210"
-          onPress={() => {}}
-        />
-        <ListRow icon={Mail} title="Email" value="arjun@…" onPress={() => {}} />
-        <ListRow
-          icon={Lock}
-          title="Change password"
-          onPress={() => navigation.navigate('ForgotPassword')}
-        />
-        <ListRow
-          icon={Globe}
-          title="Language"
-          value="English"
-          onPress={() => {}}
-          last
-        />
-      </Card>
-
-      <Txt variant="tiny" style={styles.group}>
-        PRIVACY
-      </Txt>
-      <Card padded={false} style={styles.card}>
-        <ListRow
-          icon={MapPin}
-          title="Show my distance"
-          {...t('showDistance')}
-        />
-        <ListRow icon={Eye} title="Show online status" {...t('showOnline')} />
-        <ListRow
-          icon={EyeOff}
-          title="Incognito mode"
-          subtitle="Only people you like can see you"
-          {...t('incognito')}
-        />
-        <ListRow
-          icon={MessageCircle}
-          title="Read receipts"
-          {...t('readReceipts')}
-        />
-        <ListRow
-          icon={Video}
-          title="Allow calls from matches"
-          {...t('allowCalls')}
-          last
-        />
-      </Card>
+      {account.length ? (
+        <>
+          <Txt variant="tiny" style={styles.group}>
+            ACCOUNT
+          </Txt>
+          <Card padded={false} style={styles.card}>
+            {account.map((row, i) => (
+              <ListRow
+                key={row.title}
+                {...row}
+                last={i === account.length - 1}
+              />
+            ))}
+          </Card>
+        </>
+      ) : null}
 
       <Txt variant="tiny" style={styles.group}>
         SAFETY
@@ -122,21 +83,6 @@ export default function SettingsScreen({ navigation }) {
           icon={FileText}
           title="Safety tips"
           onPress={() => navigation.navigate('Content', { page: 'safety' })}
-          last
-        />
-      </Card>
-
-      <Txt variant="tiny" style={styles.group}>
-        NOTIFICATIONS
-      </Txt>
-      <Card padded={false} style={styles.card}>
-        <ListRow icon={Bell} title="New matches" {...t('pushMatches')} />
-        <ListRow icon={MessageCircle} title="Messages" {...t('pushMessages')} />
-        <ListRow icon={Phone} title="Likes & super likes" {...t('pushLikes')} />
-        <ListRow
-          icon={Bell}
-          title="Offers & announcements"
-          {...t('pushPromos')}
           last
         />
       </Card>

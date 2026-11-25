@@ -46,6 +46,7 @@ export function toAppUser(u) {
     ...ME,
     id: u.id || u._id,
     phone: u.phone,
+    email: u.email || '',
     name: u.name || '',
     gender: u.gender,
     age,

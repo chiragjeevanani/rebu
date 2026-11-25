@@ -5,10 +5,9 @@ import { useNavigation } from '@react-navigation/native';
 import LinearGradient from 'react-native-linear-gradient';
 import {
   ChevronRight,
-  Eye,
-  Gem,
   Megaphone,
   Plus,
+  Users,
   Video,
 } from 'lucide-react-native';
 import { colors, fonts, spacing } from '../theme';
@@ -18,15 +17,6 @@ import { num } from '../utils/format';
 import Txt from './Txt';
 import { CoinIcon } from './CoinPill';
 import { useFrame, useRegisterSlot, useSlot } from '../navigation/headerSlots';
-
-// Deterministic demo stats so numbers don't jump between renders.
-export const hostStats = h => {
-  const seed = h.id.split('').reduce((n, c) => n + c.charCodeAt(0), 0);
-  return {
-    viewers: h.online ? 3 + ((seed * 37) % 180) : 0,
-    diamonds: h.followers * (60 + (seed % 140)),
-  };
-};
 
 export const compact = n => {
   if (n >= 1e6) return `${(n / 1e6).toFixed(2).replace(/\.?0+$/, '')}M`;
@@ -112,9 +102,15 @@ export function QuickActions() {
   );
 }
 
-/** Tall photo card with viewer count, avatar, name and diamonds. */
+/** Tall photo card: real live/online status, avatar, name and followers. */
 export function LiveCard({ host, width, height = 266, onPress }) {
-  const { viewers, diamonds } = hostStats(host);
+  const status = host.liveId
+    ? host.liveMode === 'audio'
+      ? 'IN A ROOM'
+      : 'LIVE'
+    : host.online
+    ? 'Online'
+    : 'Offline';
   return (
     <Pressable onPress={onPress} style={[styles.card, { width, height }]}>
       <Image
@@ -130,13 +126,15 @@ export function LiveCard({ host, width, height = 266, onPress }) {
         style={styles.shadeBottom}
       />
       <View style={styles.cardTop}>
-        {host.online ? (
-          <>
-            <Eye size={17} color={colors.white} />
-            <Txt style={styles.viewers}>{viewers}</Txt>
-          </>
+        {host.liveId ? (
+          <View style={styles.livePill}>
+            <Txt style={styles.livePillText}>{status}</Txt>
+          </View>
         ) : (
-          <Txt style={styles.offline}>Offline</Txt>
+          <>
+            {host.online ? <View style={styles.onlineDot} /> : null}
+            <Txt style={styles.offline}>{status}</Txt>
+          </>
         )}
       </View>
       <View style={styles.cardBottom}>
@@ -146,8 +144,10 @@ export function LiveCard({ host, width, height = 266, onPress }) {
             {host.name} {host.emoji || ''}
           </Txt>
           <View style={styles.diamonds}>
-            <Gem size={11} color="rgba(255,255,255,0.85)" />
-            <Txt style={styles.diamondText}>{compact(diamonds)}</Txt>
+            <Users size={11} color="rgba(255,255,255,0.85)" />
+            <Txt style={styles.diamondText}>
+              {compact(host.followers || 0)} followers
+            </Txt>
           </View>
         </View>
       </View>
@@ -359,7 +359,24 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
   },
-  viewers: { fontFamily: fonts.semibold, fontSize: 15, color: colors.white },
+  livePill: {
+    backgroundColor: colors.danger,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  livePillText: {
+    fontFamily: fonts.bold,
+    fontSize: 11,
+    letterSpacing: 0.5,
+    color: colors.white,
+  },
+  onlineDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.online,
+  },
   offline: { fontFamily: fonts.semibold, fontSize: 12, color: colors.white },
   cardBottom: {
     position: 'absolute',

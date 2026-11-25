@@ -13,8 +13,8 @@ import { inr } from '../../data/economy';
 import Button from '../../components/Button';
 
 const REASONS = [
-  'Found someone',
-  'Not getting matches',
+  'Not using the app',
+  'Didn’t find hosts I like',
   'Too expensive',
   'Privacy concerns',
   'Taking a break',
@@ -29,8 +29,9 @@ export default function DeleteAccountScreen({ navigation }) {
 
   const losses = [
     `Your ${num(coins)} coins will be lost. Coins can’t be refunded.`,
-    'Your profile, photos, matches and chats are permanently deleted.',
-    'Your call and transaction history is removed.',
+    'Your name, photos, bio, phone number and email are removed, and the account can’t be used again.',
+    'Messages you already sent stay with the people you sent them to, shown as “Deleted user”.',
+    'Payment and coin records are kept as tax law requires.',
   ];
   if (isHost) {
     losses.push(

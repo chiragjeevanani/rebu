@@ -18,7 +18,7 @@ import Input from '../../components/Input';
 import Button from '../../components/Button';
 import Chip from '../../components/Chip';
 import PhotoSourceSheet from '../../components/PhotoSourceSheet';
-import { patch, setToken } from '../../api/client';
+import { patch, setToken, uploadImage } from '../../api/client';
 
 // While typing, 15061999 becomes 15-06-1999 (the number pad has no separators).
 const formatDob = v => {
@@ -86,7 +86,8 @@ export default function ProfileSetupScreen({ navigation, route }) {
         name: form.name.trim(),
         gender: { Man: 'Male', Woman: 'Female' }[form.gender] || 'Other',
         dob: toIsoDate(form.dob),
-        photos: form.photos,
+        // Upload first: the server (and everyone else) can't read a file on this phone.
+        photos: await Promise.all(form.photos.map(uploadImage)),
       });
       await startSession(token, u);
     } catch (e) {

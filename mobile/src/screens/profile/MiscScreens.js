@@ -346,7 +346,7 @@ export function VerificationScreen({ navigation }) {
     {
       icon: ShieldCheck,
       title: 'Get your blue tick',
-      body: 'Verified profiles get up to 2× more matches and calls.',
+      body: 'Verified profiles show a blue tick, so people know you’re real.',
     },
   ];
   return (
@@ -472,15 +472,15 @@ const CONTENT = {
     sections: [
       [
         'What we collect',
-        'Profile details, photos, approximate location, and usage data to provide matching.',
+        'Your phone number or email, profile details and photos, messages, gifts and call history, purchases, and for hosts their verification and payout details. Calls and lives are not recorded. We don’t access your location, contacts or files.',
       ],
       [
         'How we use it',
-        'To show you relevant people nearby, keep REBU safe and improve the service.',
+        'To run your account, connect calls, chats and lives, charge coins and pay hosts, verify hosts and keep REBU safe. We don’t sell your data or show third-party ads.',
       ],
       [
         'Your controls',
-        'Hide distance, go incognito, download or delete your data at any time.',
+        'Edit your profile, block or report anyone, and delete your account in Settings. Full policy: rebu.live/privacy.html',
       ],
     ],
   },
@@ -506,8 +506,8 @@ const CONTENT = {
         'Never share bank details, OTPs or your home address.',
       ],
       [
-        'Meet in public',
-        'For your first date, meet in a public place and tell a friend.',
+        'Stay on REBU',
+        'Keep chats and payments inside the app. Be careful with anyone who asks you to move to another app or send money.',
       ],
       [
         'Report & block',
