@@ -31,7 +31,18 @@ export const env = {
     keySecret: process.env.RAZORPAY_KEY_SECRET || '',
     webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || '',
   },
-  // SMS for OTP: OTP_PROVIDER=msg91 | twilio (mock logs the code).
+  // SMS for OTP: OTP_PROVIDER=smsindiahub | msg91 | twilio (mock logs the code).
+  smsIndiaHub: {
+    apiKey: process.env.SMSINDIAHUB_API_KEY || '',
+    senderId: process.env.SMSINDIAHUB_SENDER_ID || '',
+    templateId: process.env.SMSINDIAHUB_TEMPLATE_ID || '', // DLT template id
+    peId: process.env.SMSINDIAHUB_PE_ID || '', // DLT principal entity id
+    route: process.env.SMSINDIAHUB_ROUTE || '', // optional, from the SMS India Hub panel
+    // Must match the DLT template exactly; {code} is replaced with the OTP.
+    text:
+      process.env.SMSINDIAHUB_TEXT ||
+      'Welcome to the REBU powered by Appzeto.Your OTP for registration is {code}.BGADEC',
+  },
   msg91: {
     authKey: process.env.MSG91_AUTH_KEY || '',
     templateId: process.env.MSG91_TEMPLATE_ID || '',

@@ -35,7 +35,34 @@ async function deliverOtp(phone, code) {
     return
   }
   let r
-  if (env.otpProvider === 'msg91') {
+  if (env.otpProvider === 'smsindiahub') {
+    // DLT-registered template; the gateway answers 200 with ErrorCode "000" on success.
+    const s = env.smsIndiaHub
+    const q = new URLSearchParams({
+      APIKey: s.apiKey,
+      senderid: s.senderId,
+      channel: 'Trans',
+      DCS: '0',
+      flashsms: '0',
+      number: `91${phone}`,
+      text: s.text.replace('{code}', code),
+      DLTTemplateId: s.templateId,
+      PEId: s.peId,
+    })
+    if (s.route) q.set('route', s.route)
+    let body
+    try {
+      const res = await fetch(`https://cloud.smsindiahub.in/api/mt/SendSMS?${q}`, { signal: AbortSignal.timeout(15000) })
+      body = await res.json().catch(() => ({}))
+    } catch (e) {
+      body = { ErrorCode: 'network', ErrorMessage: e.message }
+    }
+    if (body.ErrorCode !== '000') {
+      console.error('[otp] SMS failed smsindiahub', body.ErrorCode, String(body.ErrorMessage || '').slice(0, 200))
+      throw new ApiError(502, 'sms_failed', 'We couldn’t send the code right now. Please try again in a minute.')
+    }
+    return
+  } else if (env.otpProvider === 'msg91') {
     // DLT-approved template with a ##OTP## variable.
     r = await fetch('https://control.msg91.com/api/v5/flow', {
       method: 'POST',
