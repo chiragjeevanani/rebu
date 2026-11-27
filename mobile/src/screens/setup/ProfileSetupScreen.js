@@ -22,7 +22,7 @@ import { patch, setToken, uploadImage } from '../../api/client';
 
 // While typing, 15061999 becomes 15-06-1999 (the number pad has no separators).
 const formatDob = v => {
-  const d = v.replace(/D/g, '').slice(0, 8);
+  const d = v.replace(/\D/g, '').slice(0, 8);
   return [d.slice(0, 2), d.slice(2, 4), d.slice(4)].filter(Boolean).join('-');
 };
 
