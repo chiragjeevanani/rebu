@@ -218,7 +218,7 @@ ok(r.family?.members === 2 && r.reward === 50, 'join + first-join reward', r)
 ok((await coinsOf('u2')) === before + 50, 'reward credited')
 r = await api('u2', 'POST', `/families/${famId}/join`)
 ok(r.status === 409, 'can’t join twice', r.status)
-await api('u2', 'POST', '/gifts', { toId: U.h1.id, giftKey: 'rose', context: { type: 'chat' } })
+await api('u2', 'POST', '/gifts', { toId: U.h1.id, giftKey: 'lollipop', context: { type: 'chat' } })
 await sleep(200)
 r = await api('u2', 'GET', `/families/${famId}`)
 ok(r.family?.weekly === 10 && r.members?.length === 2, 'member gifts count toward the week', r.family)
@@ -379,7 +379,7 @@ ok('answerRate' in r.host && r.host.followers >= 1 && 'idType' in r.host, 'host 
 r = await adminApi('GET', '/hosts?sort=lifetime&dir=desc&limit=5')
 ok(r.items?.length && r.items.every((h, i, a) => !i || (a[i - 1].lifetime ?? 0) >= (h.lifetime ?? 0)), 'hosts sorted by lifetime earnings', r.items?.map(h => h.lifetime))
 r = await adminApi('GET', '/finance/gifts?days=30')
-const rose = r.items?.find(g => g.key === 'rose')
+const rose = r.items?.find(g => g.key === 'lollipop')
 const heart = r.items?.find(g => g.key === 'heart')
 ok(rose?.sent >= 1 && heart?.sent >= 1 && rose.gross > 0, 'gift sales by gift', r.items)
 r = await adminApi('GET', '/finance/revenue?days=30')
@@ -398,9 +398,9 @@ ok(r.hostCategories?.length >= 2 && r.hostLevels?.[0]?.giftCoins === 0 && r.send
 const lv = r.hostLevels
 const before3 = await User.findById(U.h2.id, { host: 1 })
 await creditCoins(U.u2.id, lv[2].giftCoins + 10000, { type: 'admin_adjust', title: 'test top-up' })
-// Enough gift coins to reach level 3: send Rockets (9999 each) until past the threshold.
+// Enough gift coins to reach level 3: send Unicorns (10,000 each) until past the threshold.
 const need = lv[2].giftCoins - (before3.host.giftCoins || 0)
-for (let sent = 0; sent < need; sent += 9999) await api('u2', 'POST', '/gifts', { toId: U.h2.id, giftKey: 'rocket', context: { type: 'chat' } })
+for (let sent = 0; sent < need; sent += 10000) await api('u2', 'POST', '/gifts', { toId: U.h2.id, giftKey: 'unicorn', context: { type: 'chat' } })
 const after3 = await User.findById(U.h2.id, { host: 1 })
 ok(after3.host.giftCoins >= lv[2].giftCoins && after3.host.level >= 3, 'gift coins raise the host level', after3.host)
 r = await api('u2', 'GET', `/hosts/${U.h2.id}`)
@@ -419,8 +419,8 @@ ok(r.user?.senderTier?.key === 'silver', 'the app sees its own frame', r.user?.s
 
 console.log('gift animations')
 r = await api(null, 'GET', '/config')
-const anim = r.gifts?.find(g => g.key === 'rose')?.animation
-ok(r.gifts?.every(g => g.animation), 'every bundled gift has an animation', r.gifts?.map(g => g.animation))
+const anim = r.gifts?.find(g => g.key === 'lollipop')?.lottie
+ok(r.gifts?.every(g => g.lottie) && r.gifts.every(g => g.animation === undefined), 'every gift has an animation, sent as lottie (older apps get none)', r.gifts?.map(g => g.lottie))
 const lottie = await (await fetch(BASE + anim)).json().catch(() => null)
 ok(Array.isArray(lottie?.layers) && lottie.fr > 0, 'animation file is served as Lottie JSON', anim)
 r = await adminApi('POST', '/uploads/animation', lottie)

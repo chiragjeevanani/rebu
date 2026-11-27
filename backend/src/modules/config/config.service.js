@@ -75,7 +75,12 @@ export function publicConfig() {
       agencyCut: c.economy.agencyCut,
     },
     coinPacks: c.coinPacks.filter(p => p.active),
-    gifts: c.gifts.filter(g => g.active).sort((a, b) => a.order - b.order),
+    // Animations go out as `lottie`. Apps before 1.4.5 fetched every `animation` at
+    // startup (~23 MB with the 3D gift set), so they get none and show the emoji effect.
+    gifts: c.gifts
+      .filter(g => g.active && (g.category !== 'Festival' || c.settings.features?.festivalGifts !== false))
+      .sort((a, b) => a.order - b.order)
+      .map(({ animation, ...g }) => ({ ...g, lottie: animation || null })),
     hostLevels: c.hostLevels,
     hostCategories: c.hostCategories,
     senderTiers: c.senderTiers.filter(t => t.minCoins > 0),

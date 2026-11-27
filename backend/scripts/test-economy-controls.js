@@ -70,7 +70,7 @@ ok((await cfg()).economy.coinInr === orig.economy.coinInr, 'refused edits leave 
 
 r = await putCfg('economy', { ...orig.economy, coinInr: 0.8 })
 ok(r.status === 200, 'set coin value ₹0.80 (100 coins = ₹80)')
-let g = await sendGift('rose', 10)
+let g = await sendGift('lollipop', 10)
 ok(g.status === 201, '10 roses = 100 coins sent', g.body)
 const e1 = await lastEarning()
 ok(near(e1.gross, 80) && e1.coins === 100, `at ₹0.80 per coin, 100 coins settle at gross ₹80 (got ${e1.gross})`, e1)
@@ -78,7 +78,7 @@ ok(near(e1.gross, 80) && e1.coins === 100, `at ₹0.80 per coin, 100 coins settl
 r = await putCfg('economy', { ...orig.economy, coinInr: 0.5 })
 ok(r.status === 200 && r.body.value.coinInr === 0.5, 'admin lowers coin value to ₹0.50')
 ok((await pub()).economy.coinInr === 0.5, 'the app config shows ₹0.50 straight away')
-g = await sendGift('rose', 10)
+g = await sendGift('lollipop', 10)
 const e2 = await lastEarning()
 ok(near(e2.gross, 50), `now the same 100 coins settle at gross ₹50 (got ${e2.gross})`, e2)
 ok(near(e2.net / e1.net, 0.5 / 0.8, 0.02), 'host net moves in the same proportion as the coin value')
@@ -86,7 +86,7 @@ const e1again = await Earning.findById(e1._id).lean()
 ok(near(e1again.gross, 80) && near(e1again.net, e1.net), 'earlier earnings keep the value they were earned at')
 
 r = await putCfg('economy', { ...orig.economy, coinInr: 1.25 })
-g = await sendGift('rose', 10)
+g = await sendGift('lollipop', 10)
 const e3 = await lastEarning()
 ok(near(e3.gross, 125), `raised to ₹1.25 → 100 coins settle at gross ₹125 (got ${e3.gross})`, e3)
 const bal = (await call('GET', '/host/withdrawals', H)).body.balance
@@ -137,10 +137,10 @@ ok(!(await call('GET', '/wallet/packs', T)).body.packs.some(p => p.id === 'p3'),
 r = await call('POST', '/wallet/orders', T, { packId: 'p3' })
 ok(r.status === 400, 'and can no longer be ordered', r.body)
 
-const extra = { id: 'p8', coins: 50, bonus: 0, price: 49, tag: 'Starter', active: true, firstRecharge: false }
+const extra = { id: 'ptest', coins: 50, bonus: 0, price: 49, tag: 'Starter', active: true, firstRecharge: false }
 r = await putCfg('coinPacks', [...packs, extra])
-ok(r.status === 200 && (await call('GET', '/wallet/packs', T)).body.packs.some(p => p.id === 'p8'), 'admin adds a new pack (50 coins for ₹49)')
-r = await call('POST', '/wallet/orders', T, { packId: 'p8' })
+ok(r.status === 200 && (await call('GET', '/wallet/packs', T)).body.packs.some(p => p.id === 'ptest'), 'admin adds a new pack (50 coins for ₹49)')
+r = await call('POST', '/wallet/orders', T, { packId: 'ptest' })
 ok(r.status === 201 && r.body.order.amount === 49 && r.body.order.coins === 50, 'new pack orders at ₹49 for 50 coins', r.body.order)
 
 for (const [label, bad] of [
@@ -187,8 +187,8 @@ await putCfg('diamondsPerCoin', { value: orig.diamondsPerCoin })
 section('Max gifts per send')
 r = await putCfg('economy', { ...orig.economy, maxGiftQuantity: 5 })
 ok(r.status === 200 && (await pub()).economy.maxGiftQuantity === 5, 'admin limits one send to 5 gifts (app sees it)')
-ok((await sendGift('rose', 5)).status === 201, '5 roses go through')
-r = await sendGift('rose', 6)
+ok((await sendGift('lollipop', 5)).status === 201, '5 roses go through')
+r = await sendGift('lollipop', 6)
 ok(r.status === 400 && /5/.test(r.body?.error?.message || ''), '6 roses are refused with the limit in the message', r.body)
 for (const bad of [0, 1000, 'x']) {
   const x = await putCfg('economy', { ...orig.economy, maxGiftQuantity: bad })
@@ -210,6 +210,17 @@ ok(r.status === 201, 'with the switch off a man can go live', r.body)
 if (r.body?.live?.id) await call('POST', `/lives/${r.body.live.id}/end`, T)
 r = await putCfg('settings', settings0)
 ok(r.status === 200 && (await goLive()).status === 403, 'switching it back on blocks men again')
+
+console.log('festival gifts switch')
+const fest = async () => (await pub()).gifts.filter(g => g.category === 'Festival').length
+ok(settings0.features.festivalGifts !== false && (await fest()) === 10, 'festival gifts are on by default (10 in the app)')
+r = await putCfg('settings', { ...settings0, features: { ...settings0.features, festivalGifts: false } })
+ok(r.status === 200 && (await fest()) === 0, 'admin switches festival gifts off: the app stops showing them')
+r = await sendGift('diya', 1)
+ok(r.status === 404, 'a festival gift can’t be sent while the switch is off', r.body)
+ok((await sendGift('lollipop', 1)).status === 201, 'other gifts still send')
+r = await putCfg('settings', settings0)
+ok(r.status === 200 && (await fest()) === 10 && (await sendGift('diya', 1)).status === 201, 'switching it back on brings them back')
 
 console.log(`\n${passed} passed, ${fails} failed`)
 await disconnectDb()

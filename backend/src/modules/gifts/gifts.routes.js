@@ -17,8 +17,10 @@ import { appendMessage, emitMessage, ensureConversation } from '../chat/chat.ser
 export const giftsRoutes = Router()
 
 const same = (a, b) => String(a) === String(b)
-const activeGifts = () => getConfig().gifts.filter(g => g.active).sort((a, b) => a.order - b.order)
-const publicGift = g => ({ key: g.key, name: g.name, emoji: g.emoji, coins: g.coins, fullScreen: !!g.fullScreen, category: g.category })
+// Festival gifts are sendable only while the admin's festival switch is on.
+const festivalOn = () => getConfig().settings.features?.festivalGifts !== false
+const activeGifts = () => getConfig().gifts.filter(g => g.active && (g.category !== 'Festival' || festivalOn())).sort((a, b) => a.order - b.order)
+const publicGift = g => ({ key: g.key, name: g.name, emoji: g.emoji, image: g.image, coins: g.coins, fullScreen: !!g.fullScreen, category: g.category })
 
 giftsRoutes.get(
   '/',
