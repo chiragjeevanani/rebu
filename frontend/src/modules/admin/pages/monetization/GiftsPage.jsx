@@ -9,12 +9,14 @@ import { BarList } from '../../components/charts'
 import LottiePreview from '../../components/LottiePreview'
 import { compact, inr, num } from '../../utils/format'
 
-const CATEGORIES = ['Basic', 'Popular', 'Luxury']
-const FULL_SCREEN_AT = 999
+// The app's gift panel tabs, in this order. Festival gifts show only while the
+// Festival switch is on (App settings → Features).
+const CATEGORIES = ['Popular', 'Love', 'Premium', 'Luxury', 'Royal', 'Festival']
+const FULL_SCREEN_AT = 500
 // Gifts that ship with a bundled animation at /static/gifts/<key>.json.
-const BUNDLED = ['rose', 'heart', 'kiss', 'chocolate', 'teddy', 'cake', 'ring', 'crown', 'car', 'yacht', 'castle', 'rocket']
+const BUNDLED = ['lollipop', 'candy', 'bow', 'star', 'heart', 'letter', 'teddy', 'rose', 'cupcake', 'butterfly', 'balloons', 'dove', 'tulip', 'coffee', 'heartbox', 'bouquet', 'lipstick', 'perfume', 'handbag', 'shades', 'chocolate', 'icecream', 'heels', 'watch', 'cake', 'champagne', 'sunflower', 'goldcoin', 'trophy', 'giftbox', 'dress', 'ring', 'diamond', 'crown', 'unicorn', 'island', 'castle', 'car', 'yacht', 'airballoon', 'jet', 'cruise', 'rocket', 'chest', 'moon', 'ufo', 'planet', 'palace', 'shootingstar', 'firecracker', 'sparkler', 'diya', 'lotus', 'lantern', 'bell', 'tabla', 'fireworks', 'peacock', 'diwalinight']
 const bundledFor = key => (BUNDLED.includes(key) ? `/static/gifts/${key}.json` : '')
-const MAX_ANIMATION_BYTES = 1000 * 1000
+const MAX_ANIMATION_BYTES = 2 * 1000 * 1000
 const SORTS = [
   { value: 'order', label: 'App order' },
   { value: 'asc', label: 'Price: low to high' },
@@ -29,7 +31,8 @@ const slug = s =>
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
 
-const suggestCategory = coins => (coins >= FULL_SCREEN_AT ? 'Luxury' : coins >= 99 ? 'Popular' : 'Basic')
+const suggestCategory = coins =>
+  coins >= 25000 ? 'Royal' : coins >= 2500 ? 'Luxury' : coins >= 500 ? 'Premium' : coins >= 100 ? 'Love' : 'Popular'
 
 function GiftModal({ gift, gifts, coinInr, onClose, onSave }) {
   const [f, setF] = useState(() =>
@@ -43,8 +46,9 @@ function GiftModal({ gift, gifts, coinInr, onClose, onSave }) {
           fullScreen: gift.fullScreen,
           active: gift.active,
           animation: gift.animation || '',
+          image: gift.image || '',
         }
-      : { emoji: '', name: '', key: '', coins: '', category: 'Basic', fullScreen: false, active: true, animation: '' },
+      : { emoji: '', name: '', key: '', coins: '', category: 'Popular', fullScreen: false, active: true, animation: '', image: '' },
   )
   // Until the admin touches these, they follow the name / price.
   const [touched, setTouched] = useState({ key: !!gift, fullScreen: !!gift, category: !!gift, animation: !!gift })
@@ -135,6 +139,8 @@ function GiftModal({ gift, gifts, coinInr, onClose, onSave }) {
                 fullScreen: f.fullScreen,
                 active: f.active,
                 animation: f.animation,
+                // Keep the gift's panel picture when it's edited here.
+                ...(f.image ? { image: f.image } : {}),
               })
             }
           >
@@ -398,15 +404,19 @@ function GiftCard({ gift: g, onToggle, onEdit, onDelete }) {
       }}
     >
       <div className="a-row between" style={{ alignItems: 'flex-start' }}>
-        <LottiePreview
-          src={g.animation}
-          size={64}
-          fallback={
-            <span style={{ fontSize: 44, lineHeight: 1 }} aria-hidden>
-              {g.emoji}
-            </span>
-          }
-        />
+        {g.image ? (
+          <img src={g.image} alt="" width={64} height={64} style={{ objectFit: 'contain' }} />
+        ) : (
+          <LottiePreview
+            src={g.animation}
+            size={64}
+            fallback={
+              <span style={{ fontSize: 44, lineHeight: 1 }} aria-hidden>
+                {g.emoji}
+              </span>
+            }
+          />
+        )}
         <Switch checked={g.active} onChange={onToggle} />
       </div>
       <div>
@@ -421,7 +431,7 @@ function GiftCard({ gift: g, onToggle, onEdit, onDelete }) {
         <span className="a-muted a-small">coins</span>
       </div>
       <div className="a-row wrap" style={{ gap: 6 }}>
-        <Badge tone={g.category === 'Luxury' ? 'violet' : g.category === 'Popular' ? 'info' : 'neutral'}>{g.category}</Badge>
+        <Badge tone={{ Royal: 'brand', Luxury: 'violet', Premium: 'warning', Love: 'info', Festival: 'success' }[g.category] || 'neutral'}>{g.category}</Badge>
         {g.fullScreen ? <Badge tone="brand">Large animation</Badge> : null}
         {!g.animation ? <Badge tone="warning">No animation</Badge> : g.animation !== bundledFor(g.key) ? <Badge tone="info">Custom animation</Badge> : null}
       </div>

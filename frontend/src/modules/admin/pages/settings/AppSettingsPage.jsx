@@ -34,6 +34,7 @@ const LOGIN_METHODS = [
 ]
 
 const FEATURES = [
+  ['festivalGifts', 'Festival gifts', 'The Festival tab in the gift panel (Diwali set). Switch it on for the festival season; while off, festival gifts are hidden and can’t be sent.'],
   ['randomCall', 'Random call', 'The “Random call” button that matches users with an available host.'],
   ['goLive', 'Go live', 'The Go Live option on the camera button. Hosts can’t start new live streams.'],
   ['premiumLive', 'Premium (ticketed) lives', 'Hosts can charge an entry ticket in coins for a live.'],
