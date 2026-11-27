@@ -105,6 +105,11 @@ export default function SettingsScreen({ navigation }) {
           icon={FileText}
           title="Community guidelines"
           onPress={() => navigation.navigate('Content', { page: 'guidelines' })}
+        />
+        <ListRow
+          icon={FileText}
+          title="Gift artwork credits"
+          onPress={() => navigation.navigate('Content', { page: 'credits' })}
           last
         />
       </Card>

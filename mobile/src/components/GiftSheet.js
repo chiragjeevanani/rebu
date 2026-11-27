@@ -1,6 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
-import { Minus, Plus } from 'lucide-react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { colors, fonts, radius } from '../theme';
 import { GIFTS } from '../data/mock';
 import { useApp } from '../context/AppContext';
@@ -8,58 +7,13 @@ import Sheet from './Sheet';
 import Txt from './Txt';
 import Button from './Button';
 import CoinPill, { CoinIcon } from './CoinPill';
-import { BIG_GIFT_COINS, useGiftFx } from './GiftFx';
-import { post } from '../api/client';
+import { BIG_GIFT_COINS, useGiftFx, warmGift } from './GiftFx';
+import GiftArt from './GiftArt';
 
-/** − / + for the quantity; hold a button to keep counting. */
-function Stepper({ value, onChange, max, dark }) {
-  const timers = useRef({});
-  const latest = useRef(value);
-  latest.current = value;
-  const stop = () => {
-    clearTimeout(timers.current.wait);
-    clearInterval(timers.current.run);
-  };
-  useEffect(() => stop, []);
-  const bump = d => onChange(v => Math.min(max, Math.max(1, v + d)));
-  const hold = d => {
-    bump(d);
-    stop();
-    timers.current.wait = setTimeout(() => {
-      timers.current.run = setInterval(() => {
-        // Reached an end: nothing more to count.
-        if ((d > 0 && latest.current >= max) || (d < 0 && latest.current <= 1))
-          stop();
-        else bump(d);
-      }, 90);
-    }, 350);
-  };
-  const tone = dark ? colors.white : colors.ink;
-  // A plain function (not a component defined here) so the buttons keep their
-  // identity between renders and a held press isn't torn down mid-hold.
-  const button = (Icon, d, off) => (
-    <Pressable
-      onPressIn={() => hold(d)}
-      onPressOut={stop}
-      disabled={off}
-      hitSlop={6}
-      style={[
-        styles.stepBtn,
-        dark && styles.stepBtnDark,
-        off && styles.stepOff,
-      ]}
-    >
-      <Icon size={18} color={tone} />
-    </Pressable>
-  );
-  return (
-    <View style={styles.stepper}>
-      {button(Minus, -1, value <= 1)}
-      <Txt style={[styles.qty, { color: tone }]}>{value}</Txt>
-      {button(Plus, 1, value >= max)}
-    </View>
-  );
-}
+// Gift panel tabs, in this order (a gift's category is its tab).
+const TAB_ORDER = ['Popular', 'Love', 'Premium', 'Luxury', 'Royal', 'Festival'];
+const QUICK = [1, 10, 50, 100];
+import { post } from '../api/client';
 
 export default function GiftSheet({
   visible,
@@ -75,14 +29,22 @@ export default function GiftSheet({
   // Admin-edited catalog from the server; the bundled list is only a fallback.
   const gifts = config?.gifts?.length ? config.gifts : GIFTS;
   const fx = useGiftFx();
-  const [selected, setSelected] = useState('rose');
+  const tabs = useMemo(() => {
+    const have = [...new Set(gifts.map(g => g.category).filter(Boolean))];
+    return [...TAB_ORDER.filter(t => have.includes(t)), ...have.filter(t => !TAB_ORDER.includes(t))];
+  }, [gifts]);
+  const [tab, setTab] = useState(null);
+  const activeTab = tabs.includes(tab) ? tab : tabs[0];
+  const shown = tabs.length ? gifts.filter(g => g.category === activeTab) : gifts;
+  const [selected, setSelected] = useState(gifts[0]?.key || 'rose');
   // How many of the selected gift (one gift type per send).
   const [qty, setQty] = useState(1);
   // The limit comes from the admin panel. A server that doesn't send one can't
   // do bulk sends, and an admin can switch it off with 1: no stepper either way.
   const limit = config?.economy?.maxGiftQuantity;
   const max = Number.isFinite(limit) ? Math.max(1, limit) : 1;
-  const multi = max > 1;
+  const quick = QUICK.filter(n => n <= max);
+  const multi = quick.length > 1;
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const gift = gifts.find(g => g.key === selected) || gifts[0];
@@ -95,6 +57,10 @@ export default function GiftSheet({
     if (key !== selected) setQty(1);
     setSelected(key);
   };
+  // Download the chosen gift's animation now, so it plays the moment it's sent.
+  useEffect(() => {
+    if (visible) warmGift(gift?.lottie || gift?.animation, gift?.key);
+  }, [visible, gift?.lottie, gift?.animation, gift?.key]);
 
   const done = () => {
     onSend?.(sent);
@@ -141,8 +107,17 @@ export default function GiftSheet({
       dark={dark}
       right={<CoinPill amount={coins} onPress={onRecharge} light={!dark} />}
     >
-      <View style={styles.grid}>
-        {gifts.map(g => {
+      {tabs.length > 1 ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabs}>
+          {tabs.map(t => (
+            <Pressable key={t} onPress={() => setTab(t)} style={[styles.tab, t === activeTab && styles.tabOn]}>
+              <Txt style={[styles.tabText, { color: t === activeTab ? colors.white : dark ? 'rgba(255,255,255,0.7)' : colors.textMuted }]}>{t}</Txt>
+            </Pressable>
+          ))}
+        </ScrollView>
+      ) : null}
+      <ScrollView style={styles.gridScroll} contentContainerStyle={styles.grid}>
+        {shown.map(g => {
           const active = g.key === selected;
           return (
             <Pressable
@@ -154,12 +129,12 @@ export default function GiftSheet({
                 active && styles.itemActive,
               ]}
             >
-              {g.coins >= BIG_GIFT_COINS ? (
+              {(g.fullScreen ?? g.coins >= BIG_GIFT_COINS) ? (
                 <View style={styles.fxTag}>
                   <Txt style={styles.fxTagText}>FX</Txt>
                 </View>
               ) : null}
-              <Txt style={styles.emoji}>{g.emoji}</Txt>
+              <GiftArt gift={g} size={52} />
               <Txt
                 style={[
                   styles.name,
@@ -176,7 +151,7 @@ export default function GiftSheet({
             </Pressable>
           );
         })}
-      </View>
+      </ScrollView>
       {multi ? (
         <View style={styles.qtyRow}>
           <View style={styles.qtyText}>
@@ -192,10 +167,16 @@ export default function GiftSheet({
               variant="tiny"
               color={dark ? 'rgba(255,255,255,0.6)' : colors.textMuted}
             >
-              One gift at a time · up to {max}
+              Send several of the same gift at once
             </Txt>
           </View>
-          <Stepper value={qty} onChange={setQty} max={max} dark={dark} />
+          <View style={styles.quick}>
+            {quick.map(n => (
+              <Pressable key={n} onPress={() => setQty(n)} style={[styles.qBtn, dark && styles.qBtnDark, qty === n && styles.qOn]}>
+                <Txt style={[styles.qText, { color: qty === n ? colors.white : dark ? colors.white : colors.ink }]}>×{n}</Txt>
+              </Pressable>
+            ))}
+          </View>
         </View>
       ) : null}
       <Button
@@ -222,23 +203,16 @@ const styles = StyleSheet.create({
   qtyRow: { flexDirection: 'row', alignItems: 'center', marginTop: 16 },
   qtyText: { flex: 1 },
   qtyLabel: { fontFamily: fonts.semibold, fontSize: 14 },
-  stepper: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  stepBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.surfaceMuted,
-  },
-  stepBtnDark: { backgroundColor: 'rgba(255,255,255,0.12)' },
-  stepOff: { opacity: 0.35 },
-  qty: {
-    minWidth: 46,
-    textAlign: 'center',
-    fontFamily: fonts.extrabold,
-    fontSize: 20,
-  },
+  quick: { flexDirection: 'row', gap: 6 },
+  qBtn: { minWidth: 44, height: 34, paddingHorizontal: 8, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceMuted },
+  qBtnDark: { backgroundColor: 'rgba(255,255,255,0.12)' },
+  qOn: { backgroundColor: colors.primary },
+  qText: { fontFamily: fonts.bold, fontSize: 13 },
+  tabs: { gap: 6, paddingBottom: 10 },
+  tab: { paddingHorizontal: 14, height: 32, borderRadius: 16, justifyContent: 'center' },
+  tabOn: { backgroundColor: colors.primary },
+  tabText: { fontFamily: fonts.semibold, fontSize: 13 },
+  gridScroll: { maxHeight: 300 },
   fxTag: {
     position: 'absolute',
     top: 4,
@@ -263,7 +237,6 @@ const styles = StyleSheet.create({
     borderColor: colors.primary,
     backgroundColor: 'rgba(255,61,119,0.14)',
   },
-  emoji: { fontSize: 30, lineHeight: 38 },
   name: { fontFamily: fonts.semibold, fontSize: 11.5, marginTop: 2 },
   price: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 3 },
   coins: { fontFamily: fonts.bold, fontSize: 11, color: colors.coin },

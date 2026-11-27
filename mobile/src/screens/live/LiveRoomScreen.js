@@ -33,6 +33,7 @@ import { GIFTS } from '../../data/mock';
 import { useApp } from '../../context/AppContext';
 import { num } from '../../utils/format';
 import Txt from '../../components/Txt';
+import GiftArt from '../../components/GiftArt';
 import GiftSheet from '../../components/GiftSheet';
 import { CoinIcon } from '../../components/CoinPill';
 import { useGiftFx } from '../../components/GiftFx';
@@ -52,7 +53,11 @@ export default function LiveRoomScreen({ navigation, route }) {
   const { host } = route.params;
   const insets = useSafeAreaInsets();
   const fx = useGiftFx();
-  const { user, following, toggleFollow, setCoinsFromServer } = useApp();
+  const { user, following, toggleFollow, setCoinsFromServer, config } = useApp();
+  // Quick gifts: the cheapest everyday gifts from the server catalog.
+  const quickGifts = (config?.gifts?.length ? config.gifts : GIFTS)
+    .filter(g => !(g.fullScreen ?? g.coins >= 999) && g.category !== 'Festival')
+    .slice(0, 9);
   const liveId = route.params.liveId || host.liveId;
   const [live, setLive] = useState(null);
   const [agora, setAgora] = useState(null);
@@ -484,13 +489,13 @@ export default function LiveRoomScreen({ navigation, route }) {
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.gifts}
         >
-          {GIFTS.slice(0, 9).map(g => (
+          {quickGifts.map(g => (
             <Pressable
               key={g.key}
               style={styles.giftItem}
               onPress={() => sendGift(g)}
             >
-              <Txt style={styles.giftEmoji}>{g.emoji}</Txt>
+              <GiftArt gift={g} size={40} />
               <View style={styles.giftPrice}>
                 <CoinIcon size={11} />
                 <Txt style={styles.giftPriceText}>{g.coins}</Txt>

@@ -27,7 +27,7 @@ import {
   Video,
 } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../../theme';
-import { GIFTS, INTERESTS } from '../../data/mock';
+import { INTERESTS } from '../../data/mock';
 import { num } from '../../utils/format';
 import { useApp } from '../../context/AppContext';
 import Txt from '../../components/Txt';
@@ -264,18 +264,6 @@ export default function HostProfileScreen({ navigation, route }) {
               </View>
             </>
           ) : null}
-
-          <Txt variant="h3" style={styles.section}>
-            Gifts received
-          </Txt>
-          <View style={styles.wrap}>
-            {GIFTS.slice(0, 6).map((g, i) => (
-              <View key={g.key} style={styles.giftChip}>
-                <Txt style={styles.giftEmoji}>{g.emoji}</Txt>
-                <Txt variant="tiny">×{(i + 2) * 7}</Txt>
-              </View>
-            ))}
-          </View>
         </View>
       </ScrollView>
 

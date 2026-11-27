@@ -36,6 +36,8 @@ import Animated, {
 import { useApp } from '../context/AppContext';
 import { API_URL } from '../api/client';
 import { colors, fonts } from '../theme';
+import GiftArt from './GiftArt';
+import { builtInAnimation, stockAnimation } from '../data/giftAssets';
 
 // Gifts at this price and up are "luxury": tagged FX in the sheet and played larger.
 export const BIG_GIFT_COINS = 999;
@@ -70,6 +72,16 @@ function preload(url) {
 
 const absolute = url =>
   !url ? null : /^https?:\/\//.test(url) ? url : `${API_URL}${url}`;
+
+/** Download one gift's animation ahead of time (e.g. when it's picked in the gift panel). */
+export const warmGift = (url, key) =>
+  localAnimation(key, url) ? undefined : preload(absolute(url));
+
+/** The app's own copy of a gift's animation, if it has one and the server hasn't replaced it. */
+function localAnimation(key, url) {
+  const local = builtInAnimation(key);
+  return local && (!url || url === stockAnimation(key)) ? local : null;
+}
 
 /* ---------- pieces ---------- */
 
@@ -290,7 +302,7 @@ function Banner({ item, leaving }) {
           {mine && to ? ` to ${to}` : ''}
         </Text>
       </View>
-      <Text style={styles.bannerGift}>{gift.emoji}</Text>
+      <GiftArt gift={gift} size={40} />
       {item.combo > 1 ? (
         <Animated.Text style={[styles.combo, popStyle]}>
           x{item.combo}
@@ -302,7 +314,10 @@ function Banner({ item, leaving }) {
 
 /* One gift on screen: dim, rays, burst, the art and the banner. */
 function Stage({ item, leaving, failed, onFinish, onFailure, w, h }) {
-  const big = item.gift.coins >= BIG_GIFT_COINS;
+  const big = item.gift.fullScreen ?? item.gift.coins >= BIG_GIFT_COINS;
+  // Rendered gifts (with a picture) have their light rays, sparkles and confetti
+  // built into the animation, so the app's own effect layers stay off for them.
+  const baked = !!(item.gift.image && item.animation && !failed);
   const size = big ? w * 1.1 : w * 0.82;
   const started = useRef(Date.now());
   const minMs = big ? MIN_PLAY_BIG_MS : MIN_PLAY_MS;
@@ -338,15 +353,22 @@ function Stage({ item, leaving, failed, onFinish, onFailure, w, h }) {
         style={[styles.fill, big ? styles.dimBig : styles.dim, dimStyle]}
       />
       <View style={[styles.stage, { top: h * 0.5 - size / 2, height: size }]}>
-        {big ? <Rays size={size * 1.25} /> : null}
-        <Pulse size={size * 0.9} delay={350} color="rgba(255,213,79,0.9)" />
-        <Pulse size={size * 0.9} delay={900} color="rgba(255,123,172,0.9)" />
-        <Burst count={big ? 30 : 18} radius={big ? w * 0.6 : w * 0.42} />
-        {big ? <Burst count={18} radius={w * 0.45} delay={450} /> : null}
+        {big && !baked ? <Rays size={size * 1.25} /> : null}
+        {baked ? null : (
+          <>
+            <Pulse size={size * 0.9} delay={350} color="rgba(255,213,79,0.9)" />
+            <Pulse size={size * 0.9} delay={900} color="rgba(255,123,172,0.9)" />
+            <Burst count={big ? 30 : 18} radius={big ? w * 0.6 : w * 0.42} />
+            {big ? <Burst count={18} radius={w * 0.45} delay={450} /> : null}
+          </>
+        )}
         <Animated.View style={artStyle}>
           {item.animation && !failed ? (
             <LottieView
-              source={preloaded.get(item.animation) || { uri: item.animation }}
+              source={
+                item.local ||
+                preloaded.get(item.animation) || { uri: item.animation }
+              }
               autoPlay
               loop
               resizeMode="contain"
@@ -359,14 +381,20 @@ function Stage({ item, leaving, failed, onFinish, onFailure, w, h }) {
             />
           ) : (
             <View style={[styles.center, { width: size, height: size }]}>
-              <EmojiArt emoji={item.gift.emoji} size={size} />
+              {item.gift.image ? (
+                <GiftArt gift={item.gift} size={size * 0.6} />
+              ) : (
+                <EmojiArt emoji={item.gift.emoji} size={size} />
+              )}
             </View>
           )}
         </Animated.View>
       </View>
-      {Array.from({ length: big ? 16 : 10 }).map((_, i) => (
-        <Floater key={i} i={i} emoji={item.gift.emoji} w={w} h={h} big={big} />
-      ))}
+      {baked
+        ? null
+        : Array.from({ length: big ? 16 : 10 }).map((_, i) => (
+            <Floater key={i} i={i} emoji={item.gift.emoji} w={w} h={h} big={big} />
+          ))}
       <View style={[styles.bannerRow, { top: h * 0.5 - size / 2 - 64 }]}>
         <Banner item={item} leaving={leaving} />
       </View>
@@ -394,9 +422,9 @@ export function GiftFxProvider({ children }) {
     () => Object.fromEntries((config?.gifts || []).map(g => [g.key, g])),
     [config?.gifts],
   );
-  useEffect(() => {
-    for (const g of config?.gifts || []) preload(absolute(g.animation));
-  }, [config?.gifts]);
+  // Animations download on demand: the gift panel warms the picked gift, and a
+  // received gift streams from its URL (Lottie keeps a disk cache). The realistic
+  // gift set is ~23 MB, far too much to fetch up front.
 
   const show = useCallback(item => {
     clearTimeout(timer.current);
@@ -459,7 +487,16 @@ export function GiftFxProvider({ children }) {
       if (queue.current.length >= MAX_QUEUE) return;
       queue.current.push({
         gift: { ...catalog[gift.key], ...gift },
-        animation: absolute(gift.animation || catalog[gift.key]?.animation),
+        ...(() => {
+          const url =
+            gift.lottie ||
+            gift.animation ||
+            catalog[gift.key]?.lottie ||
+            catalog[gift.key]?.animation;
+          const local = localAnimation(gift.key, url);
+          // `animation` stays truthy for a built-in file (timers and effects key off it).
+          return { local, animation: local ? `asset:${local}` : absolute(url) };
+        })(),
         from,
         to: meta.to,
         photo: meta.photo || (from ? null : user?.photos?.[0]),

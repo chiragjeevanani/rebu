@@ -35,6 +35,7 @@ import { findHost, toAppHost } from '../../api/hosts';
 import { useSocketEvent } from '../../api/socket';
 import { useApp } from '../../context/AppContext';
 import Txt from '../../components/Txt';
+import GiftArt from '../../components/GiftArt';
 import Avatar from '../../components/Avatar';
 import IconButton from '../../components/IconButton';
 import GiftSheet from '../../components/GiftSheet';
@@ -110,7 +111,7 @@ function Bubble({ m, photo, name }) {
       <View style={[styles.line, mine && styles.lineMine]}>
         {!mine ? <Avatar uri={photo} size={28} /> : null}
         <LinearGradient colors={['#FFF6DA', '#FFF6DA']} style={styles.gift}>
-          <Txt style={{ fontSize: 44, lineHeight: 52 }}>{g.emoji}</Txt>
+          <GiftArt gift={{ ...g, key: g.key || m.gift }} size={64} />
           <Txt variant="label">
             {mine
               ? `You sent ${n > 1 ? `${n} × ` : 'a '}${g.name}`
